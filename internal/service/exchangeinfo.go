@@ -77,6 +77,13 @@ func (s *ExchangeInfoSrv) reTryRefreshExchangeInfo() {
 }
 
 func (s *ExchangeInfoSrv) refreshExchangeInfo() error {
+	// Check if API is banned
+	banDetector := GetBanDetector()
+	if banDetector.IsBanned(s.si.Class) {
+		log.Debugf("%s exchangeInfo refresh skipped due to API ban", s.si.Class)
+		return nil // Don't retry during ban
+	}
+
 	var url string
 	if s.si.Class == SPOT {
 		url = "https://api.binance.com/api/v3/exchangeInfo"
@@ -87,9 +94,17 @@ func (s *ExchangeInfoSrv) refreshExchangeInfo() error {
 	}
 
 	resp, err := http.Get(url)
+
+	// Check for bans
+	if banDetector.CheckResponse(s.si.Class, resp, err) {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+
 	if err != nil {
 		log.Errorf("%s exchangeInfo refresh failed, error: %s.", s.si.Class, err)
-
 		return err
 	}
 	defer resp.Body.Close()

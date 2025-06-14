@@ -12,8 +12,8 @@ func NewDelayIterator() *DelayIterator {
 		delayList: []time.Duration{
 			0 * time.Millisecond,
 			10 * time.Millisecond,
-			10 * time.Millisecond,
-			10 * time.Millisecond,
+			100 * time.Millisecond,
+			500 * time.Millisecond,
 			1000 * time.Millisecond,
 			2000 * time.Millisecond,
 			5000 * time.Millisecond,

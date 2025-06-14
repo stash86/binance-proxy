@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
@@ -80,7 +81,11 @@ func (s *KlinesSrv) Stop() {
 }
 
 func (s *KlinesSrv) errHandler(err error) {
-	log.Errorf("%s %s@%s kline websocket connection error: %s connected.", s.si.Class, s.si.Symbol, s.si.Interval, err)
+	if strings.Contains(err.Error(), "context canceled") {
+		log.Warnf("%s %s@%s kline websocket context canceled, will restart connection.", s.si.Class, s.si.Symbol, s.si.Interval)
+	} else {
+		log.Errorf("%s %s@%s kline websocket connection error: %s connected.", s.si.Class, s.si.Symbol, s.si.Interval, err)
+	}
 }
 
 func (s *KlinesSrv) connect() (doneC, stopC chan struct{}, err error) {
@@ -100,25 +105,56 @@ func (s *KlinesSrv) connect() (doneC, stopC chan struct{}, err error) {
 }
 
 func (s *KlinesSrv) initKlineData() {
+	// Check if API is banned
+	banDetector := GetBanDetector()
+	if banDetector.IsBanned(s.si.Class) {
+		log.Debugf("%s %s@%s kline initialization skipped due to API ban", s.si.Class, s.si.Symbol, s.si.Interval)
+
+		// Create empty klines list to prevent repeated initialization attempts
+		s.klinesList = list.New()
+		defer s.initDone()
+		return
+	}
+
 	var klines interface{}
 	var err error
 	log.Debugf("%s %s@%s kline initialization through REST.", s.si.Class, s.si.Symbol, s.si.Interval)
 	for d := tool.NewDelayIterator(); ; d.Delay() {
+		// Check ban status before each attempt
+		if banDetector.IsBanned(s.si.Class) {
+			log.Debugf("%s %s@%s kline initialization stopped due to API ban", s.si.Class, s.si.Symbol, s.si.Interval)
+			s.klinesList = list.New()
+			defer s.initDone()
+			return
+		}
+
+		var resp *http.Response
 		if s.si.Class == SPOT {
 			RateWait(s.ctx, s.si.Class, http.MethodGet, "/api/v3/klines", url.Values{
 				"limit": []string{"1000"},
 			})
-			klines, err = spot.NewClient("", "").NewKlinesService().
+			client := spot.NewClient("", "")
+			klines, err = client.NewKlinesService().
 				Symbol(s.si.Symbol).Interval(s.si.Interval).Limit(1000).
 				Do(s.ctx)
 		} else {
 			RateWait(s.ctx, s.si.Class, http.MethodGet, "/fapi/v1/klines", url.Values{
 				"limit": []string{"1000"},
 			})
-			klines, err = futures.NewClient("", "").NewKlinesService().
+			client := futures.NewClient("", "")
+			klines, err = client.NewKlinesService().
 				Symbol(s.si.Symbol).Interval(s.si.Interval).Limit(1000).
 				Do(s.ctx)
 		}
+
+		// Check for bans (resp might be nil for SDK calls, so we check err)
+		if banDetector.CheckResponse(s.si.Class, resp, err) {
+			log.Debugf("%s %s@%s kline initialization stopped due to detected ban", s.si.Class, s.si.Symbol, s.si.Interval)
+			s.klinesList = list.New()
+			defer s.initDone()
+			return
+		}
+
 		if err != nil {
 			log.Errorf("%s %s@%s kline initialization via REST failed, error: %s.", s.si.Class, s.si.Symbol, s.si.Interval, err)
 			continue
@@ -165,7 +201,6 @@ func (s *KlinesSrv) initKlineData() {
 		}
 
 		defer s.initDone()
-
 		break
 	}
 }

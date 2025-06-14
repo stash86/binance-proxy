@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"binance-proxy/internal/service"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -10,6 +11,16 @@ import (
 )
 
 func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
+	// Check if API is banned
+	banDetector := service.GetBanDetector()
+	if banDetector.IsBanned(s.class) {
+		log.Debugf("%s klines request returning empty due to API ban", s.class)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Data-Source", "ban-protection")
+		w.Write([]byte("[]"))
+		return
+	}
+
 	var fakeKlineTimestampOpen int64 = 0
 	symbol := r.URL.Query().Get("symbol")
 	interval := r.URL.Query().Get("interval")

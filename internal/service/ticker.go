@@ -3,6 +3,7 @@ package service
 import (
 	"binance-proxy/internal/tool"
 	"context"
+	"strings"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
@@ -194,5 +195,9 @@ func (s *TickerSrv) wsHandlerTicker24hr(event *spot.WsMarketStatEvent) {
 }
 
 func (s *TickerSrv) errHandler(err error) {
-	log.Errorf("%s %s ticker24hr websocket connection error: %s.", s.si.Class, s.si.Symbol, err)
+	if strings.Contains(err.Error(), "context canceled") {
+		log.Warnf("%s %s ticker websocket context canceled, will restart connection.", s.si.Class, s.si.Symbol)
+	} else {
+		log.Errorf("%s %s ticker24hr websocket connection error: %s.", s.si.Class, s.si.Symbol, err)
+	}
 }

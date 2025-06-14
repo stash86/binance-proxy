@@ -58,6 +58,17 @@ func (s *Handler) Router(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
+	// Check if API is banned
+	banDetector := service.GetBanDetector()
+	if banDetector.IsBanned(s.class) {
+		banned, recoveryTime := banDetector.GetBanStatus(s.class)
+		if banned {
+			log.Warnf("%s API is banned, returning empty response. Recovery time: %v", s.class, recoveryTime)
+			s.returnEmptyResponse(w, r)
+			return
+		}
+	}
+
 	msg := fmt.Sprintf("%s request %s %s from %s is not cachable", s.class, r.Method, r.RequestURI, r.RemoteAddr)
 	if s.alwaysShowForwards {
 		log.Infof(msg)
@@ -78,5 +89,60 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 
 	proxy := httputil.NewSingleHostReverseProxy(u)
 
+	// Create a custom transport to intercept responses
+	originalTransport := proxy.Transport
+	if originalTransport == nil {
+		originalTransport = http.DefaultTransport
+	}
+
+	proxy.Transport = &banCheckTransport{
+		Transport: originalTransport,
+		class:     s.class,
+		handler:   s,
+		w:         w,
+		r:         r,
+	}
+
 	proxy.ServeHTTP(w, r)
+}
+
+func (s *Handler) returnEmptyResponse(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Data-Source", "ban-protection")
+
+	switch r.URL.Path {
+	case "/api/v3/klines", "/fapi/v1/klines":
+		w.Write([]byte("[]")) // Empty klines array
+	case "/api/v3/depth", "/fapi/v1/depth":
+		w.Write([]byte(`{"lastUpdateId":0,"bids":[],"asks":[]}`))
+	case "/api/v3/ticker/24hr":
+		w.Write([]byte("{}")) // Empty ticker object
+	default:
+		w.Write([]byte("{}")) // Generic empty response
+	}
+}
+
+type banCheckTransport struct {
+	Transport http.RoundTripper
+	class     service.Class
+	handler   *Handler
+	w         http.ResponseWriter
+	r         *http.Request
+}
+
+func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.Transport.RoundTrip(req)
+
+	// Check for bans
+	banDetector := service.GetBanDetector()
+	if banDetector.CheckResponse(t.class, resp, err) {
+		// API is now banned, return empty response instead
+		if resp != nil {
+			resp.Body.Close()
+		}
+		t.handler.returnEmptyResponse(t.w, t.r)
+		return nil, nil // Don't return the actual error response
+	}
+
+	return resp, err
 }

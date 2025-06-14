@@ -3,6 +3,7 @@ package service
 import (
 	"binance-proxy/internal/tool"
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -125,6 +126,9 @@ func (s *DepthSrv) wsHandler(event *spot.WsPartialDepthEvent) {
 }
 
 func (s *DepthSrv) errHandler(err error) {
-	log.Errorf("%s %s depth websocket connection error: %s.", s.si.Class, s.si.Symbol, err)
-
+	if strings.Contains(err.Error(), "context canceled") {
+		log.Warnf("%s %s depth websocket context canceled, will restart connection.", s.si.Class, s.si.Symbol)
+	} else {
+		log.Errorf("%s %s depth websocket connection error: %s.", s.si.Class, s.si.Symbol, err)
+	}
 }
