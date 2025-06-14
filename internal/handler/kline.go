@@ -62,14 +62,14 @@ func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
 		minLen = limitInt
 	}
 
-	// Pre-allocate with exact capacity
-	klines := make([]interface{}, 0, minLen)
+	// Pre-allocate with exact length (not just capacity)
+	klines := make([]interface{}, minLen) // Length = minLen, no append needed
 
 	// Calculate start index once
 	startIdx := dataLen - minLen
 	for i := 0; i < minLen; i++ {
 		dataIdx := startIdx + i
-		klines = append(klines, []interface{}{
+		klines[i] = []interface{}{ // Direct assignment - no reallocation risk
 			data[dataIdx].OpenTime,
 			data[dataIdx].Open,
 			data[dataIdx].High,
@@ -82,7 +82,7 @@ func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
 			data[dataIdx].TakerBuyBaseAssetVolume,
 			data[dataIdx].TakerBuyQuoteAssetVolume,
 			"0",
-		})
+		}
 	}
 
 	currentTime := time.Now().UnixNano() / 1e6
