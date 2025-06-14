@@ -14,6 +14,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// Buffer pool for reusing byte buffers to reduce GC pressure
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 0, 1024) // Start with 1KB capacity
+	},
+}
+
 type BanDetector struct {
 	mu sync.RWMutex
 
@@ -168,6 +175,10 @@ func (bd *BanDetector) parseBanExpiryNonDestructive(resp *http.Response) time.Ti
 	if resp == nil || resp.Body == nil {
 		return time.Time{}
 	}
+
+	// Get buffer from pool
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf[:0]) // Reset length but keep capacity
 
 	// Read response body without consuming it
 	body, err := io.ReadAll(resp.Body)

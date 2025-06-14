@@ -2,12 +2,30 @@ package handler
 
 import (
 	"binance-proxy/internal/service"
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
+)
+
+var (
+	// JSON encoder pool for reusing encoders
+	encoderPool = sync.Pool{
+		New: func() interface{} {
+			return json.NewEncoder(nil)
+		},
+	}
+
+	// Buffer pool for JSON encoding
+	jsonBufferPool = sync.Pool{
+		New: func() interface{} {
+			return &bytes.Buffer{}
+		},
+	}
 )
 
 func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +126,19 @@ func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Data-Source", "websocket")
 
-	encoder := json.NewEncoder(w)
+	// Use pooled buffer
+	buf := jsonBufferPool.Get().(*bytes.Buffer)
+	defer jsonBufferPool.Put(buf)
+	buf.Reset()
+
+	// Create encoder with the buffer
+	encoder := json.NewEncoder(buf)
 	encoder.SetEscapeHTML(false)
-	encoder.Encode(klines)
+
+	if err := encoder.Encode(klines); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(buf.Bytes())
 }

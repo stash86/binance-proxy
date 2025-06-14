@@ -1,10 +1,25 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"sync"
 )
+
+// Reuse the pools from kline.go
+var depthEncoderPool = sync.Pool{
+	New: func() interface{} {
+		return json.NewEncoder(nil)
+	},
+}
+
+var depthBufferPool = sync.Pool{
+	New: func() interface{} {
+		return &bytes.Buffer{}
+	},
+}
 
 func (s *Handler) depth(w http.ResponseWriter, r *http.Request) {
 	symbol := r.URL.Query().Get("symbol")
@@ -54,13 +69,27 @@ func (s *Handler) depth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Data-Source", "websocket")
 
-	encoder := json.NewEncoder(w)
+	// Use pooled buffer
+	buf := depthBufferPool.Get().(*bytes.Buffer)
+	defer depthBufferPool.Put(buf)
+	buf.Reset()
+
+	// Create encoder with the buffer
+	encoder := json.NewEncoder(buf)
 	encoder.SetEscapeHTML(false)
-	encoder.Encode(map[string]interface{}{
+
+	response := map[string]interface{}{
 		"lastUpdateId": depth.LastUpdateID,
 		"E":            depth.Time,
 		"T":            depth.TradeTime,
 		"bids":         bids,
 		"asks":         asks,
-	})
+	}
+
+	if err := encoder.Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(buf.Bytes())
 }

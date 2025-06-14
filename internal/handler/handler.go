@@ -2,11 +2,13 @@ package handler
 
 import (
 	"binance-proxy/internal/service"
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -106,20 +108,30 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+// Response buffer pool for empty responses
+var responseBufferPool = sync.Pool{
+	New: func() interface{} {
+		return &bytes.Buffer{}
+	},
+}
+
 func (s *Handler) returnEmptyResponse(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Data-Source", "ban-protection")
 
+	var response []byte
 	switch r.URL.Path {
 	case "/api/v3/klines", "/fapi/v1/klines":
-		w.Write([]byte("[]")) // Empty klines array
+		response = []byte("[]") // Empty klines array
 	case "/api/v3/depth", "/fapi/v1/depth":
-		w.Write([]byte(`{"lastUpdateId":0,"bids":[],"asks":[]}`))
+		response = []byte(`{"lastUpdateId":0,"bids":[],"asks":[]}`)
 	case "/api/v3/ticker/24hr":
-		w.Write([]byte("{}")) // Empty ticker object
+		response = []byte("{}") // Empty ticker object
 	default:
-		w.Write([]byte("{}")) // Generic empty response
+		response = []byte("{}") // Generic empty response
 	}
+
+	w.Write(response)
 }
 
 type banCheckTransport struct {
