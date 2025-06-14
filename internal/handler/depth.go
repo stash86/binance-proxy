@@ -26,24 +26,28 @@ func (s *Handler) depth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	minLen := len(depth.Bids)
-	if minLen > len(depth.Asks) {
-		minLen = len(depth.Asks)
+	bidsLen := len(depth.Bids)
+	asksLen := len(depth.Asks)
+	minLen := bidsLen
+	if asksLen < minLen {
+		minLen = asksLen
 	}
 	if minLen > limitInt {
 		minLen = limitInt
 	}
 
+	// Pre-allocate with exact capacity
 	bids := make([][2]string, minLen)
 	asks := make([][2]string, minLen)
-	for i := minLen; i > 0; i-- {
-		asks[minLen-i] = [2]string{
-			depth.Asks[minLen-i].Price,
-			depth.Asks[minLen-i].Quantity,
+
+	for i := 0; i < minLen; i++ {
+		asks[i] = [2]string{
+			depth.Asks[i].Price,
+			depth.Asks[i].Quantity,
 		}
-		bids[minLen-i] = [2]string{
-			depth.Bids[minLen-i].Price,
-			depth.Bids[minLen-i].Quantity,
+		bids[i] = [2]string{
+			depth.Bids[i].Price,
+			depth.Bids[i].Quantity,
 		}
 	}
 

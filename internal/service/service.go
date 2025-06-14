@@ -30,18 +30,16 @@ func NewService(ctx context.Context, class Class) *Service {
 	s.exchangeInfoSrv.Start()
 
 	go func() {
-		for {
-			t := time.NewTimer(time.Second)
-			for {
-				t.Reset(time.Second)
-				select {
-				case <-s.ctx.Done():
-					t.Stop()
-					return
-				case <-t.C:
-				}
+		t := time.NewTimer(time.Second)
+		defer t.Stop()
 
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-t.C:
 				s.autoRemoveExpired()
+				t.Reset(time.Second)
 			}
 		}
 	}()
@@ -50,24 +48,23 @@ func NewService(ctx context.Context, class Class) *Service {
 }
 
 func (s *Service) autoRemoveExpired() {
+	now := time.Now() // Cache time.Now() call
+
 	s.klinesSrv.Range(func(k, v interface{}) bool {
 		si := k.(symbolInterval)
 		srv := v.(*KlinesSrv)
 
 		if t, ok := s.lastGetKlines.Load(si); ok {
 			expiry := 2 * INTERVAL_2_DURATION[si.Interval]
-			if time.Now().Sub(t.(time.Time)) > expiry {
-				// log.Debugf("%s.Kline srv expired!Removed %d", si, expiry)
+			if now.Sub(t.(time.Time)) > expiry {
 				log.Debugf("%s %s@%s kline websocket closed after being idle for %.0fs.", si.Class, si.Symbol, si.Interval, expiry.Seconds())
 				s.lastGetKlines.Delete(si)
-
 				s.klinesSrv.Delete(si)
 				srv.Stop()
 			}
 		} else {
-			s.lastGetKlines.Store(si, time.Now())
+			s.lastGetKlines.Store(si, now)
 		}
-
 		return true
 	})
 	s.depthSrv.Range(func(k, v interface{}) bool {
@@ -76,17 +73,15 @@ func (s *Service) autoRemoveExpired() {
 
 		if t, ok := s.lastGetDepth.Load(si); ok {
 			expiry := 2 * time.Minute
-			if time.Now().Sub(t.(time.Time)) > expiry {
+			if now.Sub(t.(time.Time)) > expiry {
 				log.Debugf("%s %s depth websocket closed after being idle for %.0fs.", si.Class, si.Symbol, expiry.Seconds())
 				s.lastGetDepth.Delete(si)
-
 				s.depthSrv.Delete(si)
 				srv.Stop()
 			}
 		} else {
-			s.lastGetDepth.Store(si, time.Now())
+			s.lastGetDepth.Store(si, now)
 		}
-
 		return true
 	})
 	s.tickerSrv.Range(func(k, v interface{}) bool {
@@ -95,18 +90,15 @@ func (s *Service) autoRemoveExpired() {
 
 		if t, ok := s.lastGetTicker.Load(si); ok {
 			expiry := 2 * time.Minute
-			if time.Now().Sub(t.(time.Time)) > expiry {
-				// log.Debugf("%s.Ticker srv expired!Removed", si)
+			if now.Sub(t.(time.Time)) > expiry {
 				log.Debugf("%s %s ticker24hr websocket closed after being idle for %.0fs.", si.Class, si.Symbol, expiry.Seconds())
 				s.lastGetTicker.Delete(si)
-
 				s.tickerSrv.Delete(si)
 				srv.Stop()
 			}
 		} else {
-			s.lastGetTicker.Store(si, time.Now())
+			s.lastGetTicker.Store(si, now)
 		}
-
 		return true
 	})
 }
