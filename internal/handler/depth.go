@@ -9,12 +9,6 @@ import (
 )
 
 // Reuse the pools from kline.go
-var depthEncoderPool = sync.Pool{
-	New: func() interface{} {
-		return json.NewEncoder(nil)
-	},
-}
-
 var depthBufferPool = sync.Pool{
 	New: func() interface{} {
 		return &bytes.Buffer{}

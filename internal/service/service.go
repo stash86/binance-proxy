@@ -107,7 +107,7 @@ func (s *Service) Ticker(symbol string) *Ticker24hr {
 	si := NewSymbolInterval(s.class, symbol, "")
 	srv, loaded := s.tickerSrv.Load(*si)
 	if !loaded {
-		if srv, loaded = s.tickerSrv.LoadOrStore(*si, NewTickerSrv(s.ctx, si)); loaded == false {
+		if srv, loaded = s.tickerSrv.LoadOrStore(*si, NewTickerSrv(s.ctx, si)); !loaded {
 			srv.(*TickerSrv).Start()
 		}
 	}
@@ -124,7 +124,7 @@ func (s *Service) Klines(symbol, interval string) []*Kline {
 	si := NewSymbolInterval(s.class, symbol, interval)
 	srv, loaded := s.klinesSrv.Load(*si)
 	if !loaded {
-		if srv, loaded = s.klinesSrv.LoadOrStore(*si, NewKlinesSrv(s.ctx, si)); loaded == false {
+		if srv, loaded = s.klinesSrv.LoadOrStore(*si, NewKlinesSrv(s.ctx, si)); !loaded {
 			srv.(*KlinesSrv).Start()
 		}
 	}
@@ -137,7 +137,7 @@ func (s *Service) Depth(symbol string) *Depth {
 	si := NewSymbolInterval(s.class, symbol, "")
 	srv, loaded := s.depthSrv.Load(*si)
 	if !loaded {
-		if srv, loaded = s.depthSrv.LoadOrStore(*si, NewDepthSrv(s.ctx, si)); loaded == false {
+		if srv, loaded = s.depthSrv.LoadOrStore(*si, NewDepthSrv(s.ctx, si)); !loaded {
 			srv.(*DepthSrv).Start()
 		}
 	}

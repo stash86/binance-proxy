@@ -96,7 +96,7 @@ func (bd *BanDetector) CheckResponse(class Class, resp *http.Response, err error
 
 		// Check if approaching weight limits
 		if bd.isApproachingWeightLimit(class) {
-			waitTime := bd.getWeightResetTime(class)
+			waitTime := bd.getWeightResetTime()
 			if waitTime > 0 {
 				bd.setBanned(class, now.Add(waitTime))
 				log.Warnf("%s API weight limit approaching, suspending requests until %v", class, bd.getRecoveryTime(class))
@@ -178,7 +178,10 @@ func (bd *BanDetector) parseBanExpiryNonDestructive(resp *http.Response) time.Ti
 
 	// Get buffer from pool
 	buf := bufferPool.Get().([]byte)
-	defer bufferPool.Put(buf[:0]) // Reset length but keep capacity
+	defer func() {
+		buf = buf[:0] // Reset length but keep capacity
+		bufferPool.Put(buf)
+	}()
 
 	// Read response body without consuming it
 	body, err := io.ReadAll(resp.Body)
@@ -377,7 +380,7 @@ func (bd *BanDetector) isApproachingWeightLimit(class Class) bool {
 	return false
 }
 
-func (bd *BanDetector) getWeightResetTime(class Class) time.Duration {
+func (bd *BanDetector) getWeightResetTime() time.Duration {
 	// Weight limits reset every minute, so wait until next minute
 	now := time.Now()
 	nextMinute := now.Truncate(time.Minute).Add(time.Minute)

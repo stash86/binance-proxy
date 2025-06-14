@@ -26,6 +26,30 @@ type ExchangeInfoSrv struct {
 	exchangeInfo []byte
 }
 
+// HTTP client pool for connection reuse
+var (
+	httpClientOnce sync.Once
+	httpClient     *http.Client
+)
+
+func getHTTPClient() *http.Client {
+	httpClientOnce.Do(func() {
+		transport := &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+			DisableCompression:  false,
+			ForceAttemptHTTP2:   true,
+		}
+
+		httpClient = &http.Client{
+			Transport: transport,
+			Timeout:   30 * time.Second,
+		}
+	})
+	return httpClient
+}
+
 func NewExchangeInfoSrv(ctx context.Context, si *symbolInterval) *ExchangeInfoSrv {
 	s := &ExchangeInfoSrv{
 		si:         si,
@@ -93,7 +117,15 @@ func (s *ExchangeInfoSrv) refreshExchangeInfo() error {
 		RateWait(s.ctx, s.si.Class, http.MethodGet, "/fapi/v1/exchangeInfo", nil)
 	}
 
-	resp, err := http.Get(url)
+	// Use pooled HTTP client instead of http.Get()
+	client := getHTTPClient()
+	req, err := http.NewRequestWithContext(s.ctx, http.MethodGet, url, nil)
+	if err != nil {
+		log.Errorf("%s exchangeInfo request creation failed, error: %s.", s.si.Class, err)
+		return err
+	}
+
+	resp, err := client.Do(req)
 
 	// Check for bans
 	if banDetector.CheckResponse(s.si.Class, resp, err) {

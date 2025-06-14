@@ -13,12 +13,6 @@ import (
 )
 
 var (
-	// JSON encoder pool for reusing encoders
-	encoderPool = sync.Pool{
-		New: func() interface{} {
-			return json.NewEncoder(nil)
-		},
-	}
 
 	// Buffer pool for JSON encoding
 	jsonBufferPool = sync.Pool{
