@@ -2,10 +2,10 @@
 <p align="center">
 A fast and simple <b>Websocket Proxy</b> for the <b>Binance API</b> written in <b>GoLang</b>. Mimics the behavior of API endpoints to avoid rate limiting imposed on IP's when using REST queries. Intended Usage for multiple instances of applications querying the Binance API at a rate that might lead to banning or blocking, like for example the <a href="https://github.com/freqtrade/freqtrade">Freqtrade Trading Bot</a>, or any other similar application. </p>
 
-<p align="center"><a href="https://github.com/nightshift2k/binance-proxy/releases" target="_blank"><img src="https://img.shields.io/github/v/release/nightshift2k/binance-proxy?style=for-the-badge" alt="latest version" /></a>&nbsp;<img src="https://img.shields.io/github/go-mod/go-version/nightshift2k/binance-proxy?style=for-the-badge" alt="go version" />&nbsp;<img src="https://img.shields.io/tokei/lines/github/nightshift2k/binance-proxy?color=pink&style=for-the-badge" />&nbsp;<a href="https://github.com/nightshift2k/binance-proxy/issues" target="_blank"><img src="https://img.shields.io/github/issues/nightshift2k/binance-proxy?color=purple&style=for-the-badge" alt="github issues" /></a>&nbsp;<img src="https://img.shields.io/github/license/nightshift2k/binance-proxy?color=red&style=for-the-badge" alt="license" /></p>
+<p align="center"><a href="https://github.com/stash86/binance-proxy/releases" target="_blank"><img src="https://img.shields.io/github/v/release/stash86/binance-proxy?style=for-the-badge" alt="latest version" /></a>&nbsp;<img src="https://img.shields.io/github/go-mod/go-version/stash86/binance-proxy?style=for-the-badge" alt="go version" />&nbsp;<img src="https://img.shields.io/tokei/lines/github/stash86/binance-proxy?color=pink&style=for-the-badge" />&nbsp;<a href="https://github.com/stash86/binance-proxy/issues" target="_blank"><img src="https://img.shields.io/github/issues/stash86/binance-proxy?color=purple&style=for-the-badge" alt="github issues" /></a>&nbsp;<img src="https://img.shields.io/github/license/stash86/binance-proxy?color=red&style=for-the-badge" alt="license" /></p>
 
 ## ⚡ Quick Start
-You can download the pre-compiled binary for the architecture of your choice from the [relaseses page](https://github.com/nightshift2k/binance-proxy/releases) on GitHub.
+You can download the pre-compiled binary for the architecture of your choice from the [relaseses page](https://github.com/stash86/binance-proxy/releases) on GitHub.
 
 Unzip the package to a folder of choice, preferably one that's in `$PATH`
 ```bash
@@ -19,10 +19,10 @@ That's all you need to know to start! 🎉
 
 ### 🐳 Docker-way to quick start
 
-If you don't want to install or compile the binance-proxy to your system, feel free using the prebuild  [Docker images](https://hub.docker.com/r/nightshift2k/binance-proxy) and run it from an isolated container:
+If you don't want to install or compile the binance-proxy to your system, feel free using the prebuild  [Docker images](https://hub.docker.com/r/stash86/binance-proxy) and run it from an isolated container:
 
 ```bash
-docker run --rm -d nightshift2k/binance-proxy:latest
+docker run --rm -d stash86/binance-proxy:latest
 ```
 ℹ️ Please pay attention to configuring network access, per default the ports `8090` and `8091` are exposed, if you specify different ports via parameters, you will need to re-configure your docker setup. Please refer to the [docker network documentation](https://docs.docker.com/network/), how to adjust this inside a container.
 
@@ -33,7 +33,7 @@ First of all, [download](https://golang.org/dl/) and install **Go**. Version `1.
 Installation is done by using the [`go install`](https://golang.org/cmd/go/#hdr-Compile_and_install_packages_and_dependencies) command and rename installed binary in `$GOPATH/bin`:
 
 ```bash
-go install github.com/nightshift2k/binance-proxy/cmd/binance-proxy
+go install github.com/stash86/binance-proxy/cmd/binance-proxy
 ```
 
 ## 📖 Basic Usage
@@ -114,9 +114,9 @@ Passing variables to a docker container can also be achieved in different ways, 
 
 ## 🐞 Bug / Feature Request
 
-If you find a bug (the proxy couldn't handle the query and / or gave undesired results), kindly open an issue [here](https://github.com/nightshift2k/binance-proxy/issues/new) by including a **logfile** and a **meaningful description** of the problem.
+If you find a bug (the proxy couldn't handle the query and / or gave undesired results), kindly open an issue [here](https://github.com/stash86/binance-proxy/issues/new) by including a **logfile** and a **meaningful description** of the problem.
 
-If you'd like to request a new function, feel free to do so by opening an issue [here](https://github.com/nightshift2k/binance-proxy/issues/new). 
+If you'd like to request a new function, feel free to do so by opening an issue [here](https://github.com/stash86/binance-proxy/issues/new). 
 
 ## 💻 Development
 Want to contribute? **Great!🥳**
@@ -136,7 +136,7 @@ To fix a bug or enhance an existing module, follow these steps:
 
 ## ⚠️ License
 
-`binance-proxy` is free and open-source software licensed under the [MIT License](https://github.com/nightshift2k/binance-proxy/blob/main/LICENSE). 
+`binance-proxy` is free and open-source software licensed under the [MIT License](https://github.com/stash86/binance-proxy/blob/main/LICENSE). 
 
 By submitting a pull request to this project, you agree to license your contribution under the MIT license to this project.
 
