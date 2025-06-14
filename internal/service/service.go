@@ -5,8 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"binance-proxy/internal/metrics"
-
 	log "github.com/sirupsen/logrus"
 )
 
@@ -16,73 +14,39 @@ type Service struct {
 
 	class           Class
 	exchangeInfoSrv *ExchangeInfoSrv
-	klinesSrv       sync.Map // map[symbolInterval]*KlinesSrv
-	depthSrv        sync.Map // map[symbolInterval]*DepthSrv
-	tickerSrv       sync.Map // map[symbolInterval]*TickerSrv
+	klinesSrv       sync.Map // map[symbolInterval]*Klines
+	depthSrv        sync.Map // map[symbolInterval]*Depth
+	tickerSrv       sync.Map // map[symbolInterval]*Ticker
 
 	lastGetKlines sync.Map // map[symbolInterval]time.Time
 	lastGetDepth  sync.Map // map[symbolInterval]time.Time
 	lastGetTicker sync.Map // map[symbolInterval]time.Time
-
-	// Resource management
-	cleanupTicker *time.Ticker
-	metrics       *metrics.Metrics
 }
 
 func NewService(ctx context.Context, class Class) *Service {
-	s := &Service{
-		class:   class,
-		metrics: metrics.GetMetrics(),
-	}
+	s := &Service{class: class}
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.exchangeInfoSrv = NewExchangeInfoSrv(s.ctx, NewSymbolInterval(s.class, "", ""))
 	s.exchangeInfoSrv.Start()
 
-	// Start cleanup routine with more reasonable interval
-	s.cleanupTicker = time.NewTicker(30 * time.Second)
-	go s.cleanupRoutine()
+	go func() {
+		for {
+			t := time.NewTimer(time.Second)
+			for {
+				t.Reset(time.Second)
+				select {
+				case <-s.ctx.Done():
+					t.Stop()
+					return
+				case <-t.C:
+				}
+
+				s.autoRemoveExpired()
+			}
+		}
+	}()
 
 	return s
-}
-
-func (s *Service) cleanupRoutine() {
-	defer s.cleanupTicker.Stop()
-	
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-s.cleanupTicker.C:
-			s.autoRemoveExpired()
-		}
-	}
-}
-
-func (s *Service) Stop() {
-	log.Infof("%s service shutting down", s.class)
-	s.cancel()
-	
-	// Stop all services
-	s.klinesSrv.Range(func(k, v interface{}) bool {
-		srv := v.(*KlinesSrv)
-		srv.Stop()
-		return true
-	})
-	
-	s.depthSrv.Range(func(k, v interface{}) bool {
-		srv := v.(*DepthSrv)
-		srv.Stop()
-		return true
-	})
-	
-	s.tickerSrv.Range(func(k, v interface{}) bool {
-		srv := v.(*TickerSrv)
-		srv.Stop()
-		return true
-	})
-	
-	s.exchangeInfoSrv.Stop()
-	log.Infof("%s service shutdown complete", s.class)
 }
 
 func (s *Service) autoRemoveExpired() {
