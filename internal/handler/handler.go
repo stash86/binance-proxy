@@ -105,7 +105,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 
 	service.RateWait(s.ctx, s.class, r.Method, r.URL.Path, r.URL.Query())
 
-	// Use hardcoded endpoints (working version)
+	// Use hardcoded endpoints (current working version)
 	var u *url.URL
 	if s.class == service.SPOT {
 		r.Host = "api.binance.com"

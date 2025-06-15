@@ -1,19 +1,10 @@
 package handler
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"sync"
 )
-
-// Reuse the pools from kline.go
-var depthBufferPool = sync.Pool{
-	New: func() interface{} {
-		return &bytes.Buffer{}
-	},
-}
 
 func (s *Handler) depth(w http.ResponseWriter, r *http.Request) {
 	symbol := r.URL.Query().Get("symbol")
@@ -63,12 +54,10 @@ func (s *Handler) depth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Data-Source", "websocket")
 
-	// Use pooled buffer
-	buf := depthBufferPool.Get().(*bytes.Buffer)
-	defer depthBufferPool.Put(buf)
-	buf.Reset()
+	// Use shared buffer pool
+	buf := GetBuffer()
+	defer PutBuffer(buf)
 
-	// Create encoder with the buffer
 	encoder := json.NewEncoder(buf)
 	encoder.SetEscapeHTML(false)
 

@@ -2,24 +2,12 @@ package handler
 
 import (
 	"binance-proxy/internal/service"
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
-)
-
-var (
-
-	// Buffer pool for JSON encoding
-	jsonBufferPool = sync.Pool{
-		New: func() interface{} {
-			return &bytes.Buffer{}
-		},
-	}
 )
 
 func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
@@ -63,13 +51,13 @@ func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Pre-allocate with exact length (not just capacity)
-	klines := make([]interface{}, minLen) // Length = minLen, no append needed
+	klines := make([]interface{}, minLen)
 
 	// Calculate start index once
 	startIdx := dataLen - minLen
 	for i := 0; i < minLen; i++ {
 		dataIdx := startIdx + i
-		klines[i] = []interface{}{ // Direct assignment - no reallocation risk
+		klines[i] = []interface{}{
 			data[dataIdx].OpenTime,
 			data[dataIdx].Open,
 			data[dataIdx].High,
@@ -110,7 +98,6 @@ func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if len(klines) >= minLen {
-			// Replace last element instead of append + slice
 			klines[len(klines)-1] = fakeKline
 		} else {
 			klines = append(klines, fakeKline)
@@ -120,12 +107,10 @@ func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Data-Source", "websocket")
 
-	// Use pooled buffer
-	buf := jsonBufferPool.Get().(*bytes.Buffer)
-	defer jsonBufferPool.Put(buf)
-	buf.Reset()
+	// Use shared buffer pool
+	buf := GetBuffer()
+	defer PutBuffer(buf)
 
-	// Create encoder with the buffer
 	encoder := json.NewEncoder(buf)
 	encoder.SetEscapeHTML(false)
 

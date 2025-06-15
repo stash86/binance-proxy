@@ -15,6 +15,7 @@ func (s *Handler) ticker(w http.ResponseWriter, r *http.Request) {
 		s.reverseProxy(w, r)
 		return
 	}
+
 	ticker := s.srv.Ticker(symbol)
 	if ticker == nil {
 		log.Tracef("%s ticker24hr for %s proxying via REST", s.class, symbol)
@@ -27,7 +28,16 @@ func (s *Handler) ticker(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Data-Source", "websocket")
 
-	encoder := json.NewEncoder(w)
+	buf := GetBuffer()
+	defer PutBuffer(buf)
+
+	encoder := json.NewEncoder(buf)
 	encoder.SetEscapeHTML(false)
-	encoder.Encode(ticker)
+
+	if err := encoder.Encode(ticker); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(buf.Bytes())
 }
