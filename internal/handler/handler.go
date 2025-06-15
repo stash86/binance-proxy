@@ -207,6 +207,18 @@ func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 func (s *Handler) status(w http.ResponseWriter, r *http.Request) {
+	// Check if context is still valid
+	select {
+	case <-s.ctx.Done():
+		log.Warnf("Status endpoint called but context is canceled")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error": "service shutting down", "status": "unavailable"}`))
+		return
+	default:
+		// Context is still valid, proceed normally
+	}
+
 	// Record the request
 	statusTracker := service.GetStatusTracker()
 	statusTracker.RecordRequest()
