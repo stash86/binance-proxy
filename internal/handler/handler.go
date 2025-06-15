@@ -105,6 +105,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 
 	service.RateWait(s.ctx, s.class, r.Method, r.URL.Path, r.URL.Query())
 
+	// Use hardcoded endpoints (working version)
 	var u *url.URL
 	if s.class == service.SPOT {
 		r.Host = "api.binance.com"
@@ -153,6 +154,7 @@ type banCheckTransport struct {
 	handler   *Handler
 	w         http.ResponseWriter
 	r         *http.Request
+	// Remove endpoint field until load balancer is implemented
 }
 
 func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error) {
