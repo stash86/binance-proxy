@@ -3,6 +3,7 @@ package handler
 import (
 	"binance-proxy/internal/service"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
@@ -38,7 +39,14 @@ type Handler struct {
 func (s *Handler) Router(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
+	// Record the request in status tracker
+	statusTracker := service.GetStatusTracker()
+	statusTracker.RecordRequest()
+
 	switch r.URL.Path {
+	case "/status":
+		s.status(w, r)
+
 	case "/api/v3/klines", "/fapi/v1/klines":
 		s.klines(w, r)
 
@@ -196,4 +204,37 @@ func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 
 	return resp, err
+}
+
+func (s *Handler) status(w http.ResponseWriter, r *http.Request) {
+	// Record the request
+	statusTracker := service.GetStatusTracker()
+	statusTracker.RecordRequest()
+
+	// Get current status
+	status := statusTracker.GetStatus()
+
+	// Add ban information from the existing ban detector
+	banDetector := service.GetBanDetector()
+	isBanned, recoveryTime := banDetector.GetBanStatus(s.class)
+	// Create response with both status and ban info
+	response := map[string]interface{}{
+		"proxy_status": status,
+		"class":        string(s.class),
+		"ban_info": map[string]interface{}{
+			"banned":        isBanned,
+			"recovery_time": nil,
+		},
+		"config": map[string]interface{}{
+			"fake_kline_enabled":   s.enableFakeKline,
+			"always_show_forwards": s.alwaysShowForwards,
+		},
+	}
+
+	if isBanned {
+		response["ban_info"].(map[string]interface{})["recovery_time"] = recoveryTime.Format(time.RFC3339)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }

@@ -17,6 +17,10 @@ binance-proxy
 ```
 That's all you need to know to start! 🎉
 
+Once running, you can check the proxy status at:
+- SPOT: `http://localhost:8090/status`  
+- FUTURES: `http://localhost:8091/status`
+
 ### 🐳 Docker-way to quick start
 
 If you don't want to install or compile the binance-proxy to your system, feel free using the prebuild  [Docker images](https://hub.docker.com/r/stash86/binance-proxy) and run it from an isolated container:
@@ -88,6 +92,70 @@ This example assumes, that `binance-proxy` is running on the same host as the co
 |`/api/v3/exchangeInfo`<br/>`/fapi/v1/exchangeInfo`| spot/futures| Current exchange trading rules and symbol information|60s (see comments)|`exchangeInfo` is fetched periodically via REST every 60 seconds. It is not a websocket endpoint but just being cached during runtime.|
 
 > 🚨 Every **other** REST query to an endpoint is being **forwarded** 1:1 to the **API** at https://api.binance.com !
+
+## 📊 Status Endpoint
+
+The proxy includes a built-in status endpoint to monitor the health and performance of the service:
+
+### 🔍 Accessing the Status
+- **SPOT markets**: `http://localhost:8090/status`
+- **FUTURES markets**: `http://localhost:8091/status`
+
+### 📈 Status Information
+The status endpoint provides comprehensive information about the proxy service:
+
+```json
+{
+  "proxy_status": {
+    "service": "binance-proxy",
+    "healthy": true,
+    "start_time": "2025-06-15T10:30:00Z",
+    "uptime": "2h15m30s",
+    "requests": 1542,
+    "errors": 3,
+    "error_rate": 0.19,
+    "last_error": "connection timeout",
+    "last_error_at": "2025-06-15T12:42:15Z",
+    "timestamp": "2025-06-15T12:45:30Z"
+  },
+  "class": "SPOT",
+  "ban_info": {
+    "banned": false,
+    "recovery_time": null
+  },
+  "config": {
+    "fake_kline_enabled": true,
+    "always_show_forwards": false
+  }
+}
+```
+
+### 📋 Status Fields
+| Field | Description |
+|-------|-------------|
+| `service` | Service name identifier |
+| `healthy` | Overall health status (becomes false if error rate > 10%) |
+| `start_time` | When the service was started |
+| `uptime` | How long the service has been running |
+| `requests` | Total number of requests processed |
+| `errors` | Total number of errors encountered |
+| `error_rate` | Percentage of requests that resulted in errors |
+| `last_error` | Most recent error message (if any) |
+| `last_error_at` | Timestamp of the most recent error |
+| `banned` | Whether the API is currently banned by Binance |
+| `recovery_time` | Expected recovery time if banned |
+
+### 🔧 Usage Examples
+```bash
+# Check SPOT market status
+curl http://localhost:8090/status
+
+# Check FUTURES market status  
+curl http://localhost:8091/status
+
+# Monitor in a loop (Linux/Mac)
+watch -n 5 "curl -s http://localhost:8090/status | jq"
+```
 
 
 ## ⚙️ Commands & Options
