@@ -42,10 +42,12 @@ func (s *Handler) Router(w http.ResponseWriter, r *http.Request) {
 	// Record the request in status tracker
 	statusTracker := service.GetStatusTracker()
 	statusTracker.RecordRequest()
-
 	switch r.URL.Path {
 	case "/status":
 		s.status(w, r)
+
+	case "/restart":
+		s.restart(w, r)
 
 	case "/api/v3/klines", "/fapi/v1/klines":
 		s.klines(w, r)
@@ -249,4 +251,48 @@ func (s *Handler) status(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Handler) restart(w http.ResponseWriter, r *http.Request) {
+	// Security check - only allow GET requests
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte(`{"error": "only GET method allowed", "status": "failed"}`))
+		return
+	}
+
+	log.Warnf("RESTART requested from %s for class %s", r.RemoteAddr, s.class)
+
+	// Send immediate response before restart
+	w.Header().Set("Content-Type", "application/json")
+	response := map[string]interface{}{
+		"message":   "Restart initiated",
+		"status":    "success",
+		"class":     string(s.class),
+		"timestamp": time.Now().Format(time.RFC3339),
+		"warning":   "Service will restart in 2 seconds. This will interrupt all active connections.",
+	}
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Errorf("Failed to encode restart response: %v", err)
+	}
+
+	// Flush the response to ensure it's sent
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	// Give the response time to be sent
+	go func() {
+		time.Sleep(2 * time.Second)
+		log.Warnf("Executing restart for class %s...", s.class)
+
+		// Cancel the context to trigger graceful shutdown
+		s.cancel()
+
+		// Give some time for graceful shutdown, then force exit
+		time.Sleep(3 * time.Second)
+		log.Fatalf("Force restart for class %s", s.class)
+	}()
 }

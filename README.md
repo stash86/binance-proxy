@@ -21,6 +21,10 @@ Once running, you can check the proxy status at:
 - SPOT: `http://localhost:8090/status`  
 - FUTURES: `http://localhost:8091/status`
 
+And restart the service remotely at:
+- SPOT: `http://localhost:8090/restart`
+- FUTURES: `http://localhost:8091/restart`
+
 ### 🐳 Docker-way to quick start
 
 If you don't want to install or compile the binance-proxy to your system, feel free using the prebuild  [Docker images](https://hub.docker.com/r/stash86/binance-proxy) and run it from an isolated container:
@@ -155,6 +159,289 @@ curl http://localhost:8091/status
 
 # Monitor in a loop (Linux/Mac)
 watch -n 5 "curl -s http://localhost:8090/status | jq"
+```
+
+## 🔄 Restart Endpoint
+
+The proxy includes a restart endpoint for remote service management:
+
+### 🚀 Accessing the Restart
+- **SPOT markets**: `http://localhost:8090/restart`
+- **FUTURES markets**: `http://localhost:8091/restart`
+
+### ⚡ Restart Response
+```json
+{
+  "message": "Restart initiated",
+  "status": "success",
+  "class": "SPOT",
+  "timestamp": "2025-06-15T12:45:30Z",
+  "warning": "Service will restart in 2 seconds. This will interrupt all active connections."
+}
+```
+
+### 🔧 How It Works
+1. **Immediate response** sent to confirm restart initiation
+2. **2-second delay** to ensure response is delivered
+3. **Graceful shutdown** of the current process
+4. **Automatic restart** (requires process manager or Docker restart policy)
+
+### 🐳 Docker Setup for Automatic Restart
+
+#### **Basic Setup (Recommended)**
+```yaml
+version: '3.8'
+services:
+  binance-proxy:
+    build: .
+    ports:
+      - "8090:8090"
+      - "8091:8091"
+    restart: unless-stopped  # Enables automatic restart on crash/manual restart
+```
+
+#### **Advanced Setup with Health Monitoring**
+```yaml
+version: '3.8'
+services:
+  binance-proxy:
+    build: .
+    ports:
+      - "8090:8090"
+      - "8091:8091"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+```
+
+#### **Complete Setup with Auto-Heal (Restart on Health Failure)**
+```yaml
+version: '3.8'
+services:
+  binance-proxy:
+    build: .
+    ports:
+      - "8090:8090"
+      - "8091:8091"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "autoheal=true"
+
+  autoheal:
+    image: willfarrell/autoheal:latest
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=5
+```
+
+#### **Restart Policy Options**
+| Policy | Description | Use Case |
+|--------|-------------|----------|
+| `no` | Never restart (default) | Development/testing |
+| `always` | Always restart | Critical services |
+| `unless-stopped` | Restart unless manually stopped | **Recommended for production** |
+| `on-failure` | Restart only on non-zero exit | Services that shouldn't restart on normal stop |
+
+#### **What Each Setup Provides**
+
+**Basic Setup:**
+- ✅ **Manual restart** via `/restart` endpoint works
+- ✅ **Automatic restart** if container crashes
+- ✅ **Survives Docker daemon restarts**
+
+**Health Monitoring Setup:**
+- ✅ All basic features
+- ✅ **Health status** visible in `docker-compose ps`
+- ✅ **Monitor service health** over time
+- ❌ No automatic restart on health failure
+
+**Complete Auto-Heal Setup:**
+- ✅ All previous features
+- ✅ **Automatic restart** when health checks fail
+- ✅ **Full automation** - handles crashes AND hangs
+- ✅ **Production-ready** monitoring and recovery
+
+### 🖥️ Non-Docker Automatic Restart Setup
+
+#### **Linux - Systemd (Recommended)**
+Create a systemd service file:
+
+```bash
+# Create service file
+sudo nano /etc/systemd/system/binance-proxy.service
+```
+
+```ini
+[Unit]
+Description=Binance Proxy Service
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+User=binance-proxy
+ExecStart=/usr/local/bin/binance-proxy
+WorkingDirectory=/opt/binance-proxy
+Environment=BPX_VERBOSE=true
+
+# Health check and restart on failure
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+# Enable and start service
+sudo systemctl daemon-reload
+sudo systemctl enable binance-proxy
+sudo systemctl start binance-proxy
+
+# Check status
+sudo systemctl status binance-proxy
+```
+
+#### **Windows - NSSM (Non-Sucking Service Manager)**
+```powershell
+# Download and install NSSM
+# https://nssm.cc/download
+
+# Install as Windows service
+nssm install BinanceProxy "C:\Path\To\binance-proxy.exe"
+nssm set BinanceProxy AppDirectory "C:\Path\To"
+nssm set BinanceProxy DisplayName "Binance Proxy Service"
+nssm set BinanceProxy Description "Binance API Proxy with automatic restart"
+
+# Configure automatic restart
+nssm set BinanceProxy AppExit Default Restart
+nssm set BinanceProxy AppRestartDelay 5000
+
+# Start service
+nssm start BinanceProxy
+```
+
+#### **Linux - Supervisor**
+```bash
+# Install supervisor
+sudo apt-get install supervisor
+
+# Create config file
+sudo nano /etc/supervisor/conf.d/binance-proxy.conf
+```
+
+```ini
+[program:binance-proxy]
+command=/usr/local/bin/binance-proxy
+directory=/opt/binance-proxy
+user=binance-proxy
+autostart=true
+autorestart=true
+startretries=3
+redirect_stderr=true
+stdout_logfile=/var/log/binance-proxy.log
+environment=BPX_VERBOSE=true
+```
+
+```bash
+# Update supervisor and start
+sudo supervisorctl reread
+sudo supervisorctl update
+sudo supervisorctl start binance-proxy
+```
+
+#### **macOS - LaunchDaemon**
+```bash
+# Create launchd plist
+sudo nano /Library/LaunchDaemons/com.binance.proxy.plist
+```
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.binance.proxy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/binance-proxy</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>/var/log/binance-proxy.log</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/binance-proxy.log</string>
+</dict>
+</plist>
+```
+
+```bash
+# Load and start service
+sudo launchctl load /Library/LaunchDaemons/com.binance.proxy.plist
+sudo launchctl start com.binance.proxy
+```
+
+#### **Process Manager Comparison**
+
+| Method | Platform | Complexity | Features | Production Ready |
+|--------|----------|------------|----------|------------------|
+| **Systemd** | Linux | Medium | ✅ Logs, ✅ Health checks, ✅ Auto-restart | ✅ Excellent |
+| **NSSM** | Windows | Easy | ✅ GUI config, ✅ Auto-restart | ✅ Good |
+| **Supervisor** | Linux | Easy | ✅ Web UI, ✅ Process groups | ✅ Good |
+| **LaunchDaemon** | macOS | Medium | ✅ System integration | ✅ Good |
+
+#### **Manual Script Alternative (Basic)**
+For development or simple setups:
+
+```bash
+#!/bin/bash
+# restart-loop.sh
+while true; do
+    echo "Starting binance-proxy..."
+    ./binance-proxy
+    echo "Process exited with code $?. Restarting in 5 seconds..."
+    sleep 5
+done
+```
+
+```bash
+# Make executable and run
+chmod +x restart-loop.sh
+nohup ./restart-loop.sh > proxy.log 2>&1 &
+```
+
+### ⚠️ Important Notes
+- **Security**: No authentication required - restrict network access in production
+- **Scope**: Restarting either port restarts the entire service (both SPOT and FUTURES)
+- **Downtime**: Expect 10-15 seconds total restart time
+- **Fresh State**: Complete reset of connections, caches, and statistics
+
+### 🔧 Usage Examples
+```bash
+# Restart from command line
+curl http://localhost:8090/restart
+
+# Or simply visit in browser:
+# http://localhost:8090/restart
 ```
 
 
