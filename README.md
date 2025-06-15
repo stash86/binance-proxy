@@ -9,7 +9,7 @@ You can download the pre-compiled binary for the architecture of your choice fro
 
 Unzip the package to a folder of choice, preferably one that's in `$PATH`
 ```bash
-tar -xf binance-proxy_1.0.0_Linux_x86_64.tar.gz -C /usr/local/bin 
+tar -xf binance-proxy_1.0.2_Linux_x86_64.tar.gz -C /usr/local/bin 
 ```
 Starting the proxy:
 ```bash
