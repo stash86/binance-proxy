@@ -49,22 +49,22 @@ changelog:
 
 dockers:
   - image_templates:
-      - "docker.io/nightshift2k/{{ .ProjectName }}:{{ .Version }}-amd64"
+      - "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}-amd64"
     dockerfile: Dockerfile.goreleaser
     use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
       - "--label=org.opencontainers.image.title={{ .ProjectName }}"
       - "--label=org.opencontainers.image.description={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.url=https://github.com/nightshift2k/{{ .ProjectName }}"
-      - "--label=org.opencontainers.image.source=https://github.com/nightshift2k/{{ .ProjectName }}"
+      - "--label=org.opencontainers.image.url=https://github.com/stash86/{{ .ProjectName }}"
+      - "--label=org.opencontainers.image.source=https://github.com/stash86/{{ .ProjectName }}"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.created={{ time \"2006-01-02T15:04:05Z07:00\" }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=MIT"
       
   - image_templates:
-      - "docker.io/nightshift2k/{{ .ProjectName }}:{{ .Version }}-arm64v8"
+      - "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}-arm64v8"
     goarch: arm64
     dockerfile: Dockerfile.goreleaser
     use: buildx
@@ -72,20 +72,20 @@ dockers:
       - "--platform=linux/arm64/v8"
       - "--label=org.opencontainers.image.title={{ .ProjectName }}"
       - "--label=org.opencontainers.image.description={{ .ProjectName }}"
-      - "--label=org.opencontainers.image.url=https://github.com/nightshift2k/{{ .ProjectName }}"
-      - "--label=org.opencontainers.image.source=https://github.com/nightshift2k/{{ .ProjectName }}"
+      - "--label=org.opencontainers.image.url=https://github.com/stash86/{{ .ProjectName }}"
+      - "--label=org.opencontainers.image.source=https://github.com/stash86/{{ .ProjectName }}"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.created={{ time \"2006-01-02T15:04:05Z07:00\" }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=MIT"
 
 docker_manifests:
-  - name_template: "docker.io/nightshift2k/{{ .ProjectName }}:{{ .Version }}"
+  - name_template: "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}"
     image_templates:
-      - "docker.io/nightshift2k/{{ .ProjectName }}:{{ .Version }}-amd64"
-      - "docker.io/nightshift2k/{{ .ProjectName }}:{{ .Version }}-arm64v8"
+      - "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}-amd64"
+      - "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}-arm64v8"
       
-  - name_template: "docker.io/nightshift2k/{{ .ProjectName }}:latest"
+  - name_template: "docker.io/stash86/{{ .ProjectName }}:latest"
     image_templates:
-      - "docker.io/nightshift2k/{{ .ProjectName }}:{{ .Version }}-amd64"
-      - "docker.io/nightshift2k/{{ .ProjectName }}:{{ .Version }}-arm64v8"
+      - "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}-amd64"
+      - "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}-arm64v8"
