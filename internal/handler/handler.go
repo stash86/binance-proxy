@@ -80,7 +80,21 @@ func getProxyHTTPClient() *http.Client {
 			Transport: transport,
 			Timeout:   60 * time.Second, // Longer timeout for proxy requests
 		}
+
+		if proxyHTTPClient.Transport == nil {
+			log.Errorf("Created HTTP client has nil transport, using default transport")
+			proxyHTTPClient.Transport = http.DefaultTransport
+		}
 	})
+
+	if proxyHTTPClient == nil {
+		log.Errorf("HTTP client is nil, creating default client")
+		return &http.Client{
+			Transport: http.DefaultTransport,
+			Timeout:   60 * time.Second,
+		}
+	}
+
 	return proxyHTTPClient
 }
 
@@ -114,12 +128,17 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 		r.Host = "fapi.binance.com"
 		u, _ = url.Parse("https://fapi.binance.com")
 	}
-
 	proxy := httputil.NewSingleHostReverseProxy(u)
 
 	// Use custom HTTP client with connection pooling
+	transport := getProxyHTTPClient().Transport
+	if transport == nil {
+		log.Errorf("HTTP transport is nil, using default transport")
+		transport = http.DefaultTransport
+	}
+
 	proxy.Transport = &banCheckTransport{
-		Transport: getProxyHTTPClient().Transport,
+		Transport: transport,
 		class:     s.class,
 		handler:   s,
 		w:         w,
@@ -158,6 +177,11 @@ type banCheckTransport struct {
 }
 
 func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.Transport == nil {
+		log.Errorf("Transport is nil in banCheckTransport, using default transport")
+		t.Transport = http.DefaultTransport
+	}
+
 	resp, err := t.Transport.RoundTrip(req)
 
 	// Check for bans
