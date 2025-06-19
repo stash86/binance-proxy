@@ -14,6 +14,24 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// bufferPool implements httputil.BufferPool interface
+type bufferPool struct {
+	pool sync.Pool
+}
+
+func (bp *bufferPool) Get() []byte {
+	if bp.pool.New == nil {
+		bp.pool.New = func() interface{} {
+			return make([]byte, 32*1024) // 32KB buffer
+		}
+	}
+	return bp.pool.Get().([]byte)
+}
+
+func (bp *bufferPool) Put(b []byte) {
+	bp.pool.Put(b)
+}
+
 func NewHandler(ctx context.Context, class service.Class, enableFakeKline bool, alwaysShowForwards bool) func(w http.ResponseWriter, r *http.Request) {
 	handler := &Handler{
 		srv:                service.NewService(ctx, class),
@@ -251,15 +269,9 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 			// req.URL.Path is already set from the original request
 		},
 		Transport: banTransport,
-		BufferPool: &sync.Pool{
-			New: func() interface{} {
-				return make([]byte, 32*1024) // 32KB buffer
-			},
-		},
+		BufferPool: &bufferPool{},
 	}
 	
-	proxy.Transport = banTransport
-
 	// Additional safety check before calling ServeHTTP
 	if proxy.Director == nil {
 		log.Errorf("Proxy director is nil, cannot serve request")
@@ -269,8 +281,8 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Add panic recovery for the proxy ServeHTTP call
 	defer func() {
-		if r := recover(); r != nil {
-			log.Errorf("Panic recovered in reverseProxy.ServeHTTP for %s %s: %v", r.Method, r.URL.Path, r)
+		if panicVal := recover(); panicVal != nil {
+			log.Errorf("Panic recovered in reverseProxy.ServeHTTP for %s %s: %v", r.Method, r.URL.Path, panicVal)
 			// Try to write error response (it may fail if headers already sent)
 			defer func() { recover() }() // Ignore any panic from writing response
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
