@@ -257,10 +257,6 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	}
-		log.Errorf("Handler is nil in banCheckTransport")
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
 	
 	proxy.Transport = banTransport
 
