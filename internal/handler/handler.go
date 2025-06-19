@@ -76,6 +76,7 @@ var (
 
 func getProxyHTTPClient() *http.Client {
 	proxyHTTPClientOnce.Do(func() {
+		// Create a new transport each time to avoid concurrent modification issues
 		transport := &http.Transport{
 			MaxIdleConns:        200,
 			MaxIdleConnsPerHost: 20,
@@ -88,7 +89,7 @@ func getProxyHTTPClient() *http.Client {
 
 		if transport == nil {
 			log.Errorf("Failed to create HTTP transport, using default")
-			transport = http.DefaultTransport.(*http.Transport)
+			transport = http.DefaultTransport.(*http.Transport).Clone()
 		}
 
 		proxyHTTPClient = &http.Client{
@@ -118,13 +119,22 @@ func getProxyHTTPClient() *http.Client {
 		}
 	}
 
-	// Double-check transport is not nil
+	// Double-check transport is not nil and clone it to avoid concurrent modification
 	if proxyHTTPClient.Transport == nil {
 		log.Errorf("HTTP client transport is nil, fixing with default transport")
 		proxyHTTPClient.Transport = http.DefaultTransport
 	}
 
-	return proxyHTTPClient
+	// Return a copy of the client with a cloned transport to avoid concurrent modifications
+	transport := proxyHTTPClient.Transport
+	if ht, ok := transport.(*http.Transport); ok {
+		transport = ht.Clone()
+	}
+	
+	return &http.Client{
+		Transport: transport,
+		Timeout:   proxyHTTPClient.Timeout,
+	}
 }
 
 func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
@@ -195,13 +205,6 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(u)
-	if proxy == nil {
-		log.Errorf("Failed to create reverse proxy for %s", s.class)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
 	// Use custom HTTP client with connection pooling
 	httpClient := getProxyHTTPClient()
 	if httpClient == nil {
@@ -230,10 +233,65 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	// Create a fresh reverse proxy for each request to avoid shared state issues
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			if req == nil {
+				log.Errorf("Request is nil in proxy director")
+				return
+			}
+			
+			// Set the target URL
+			req.URL.Scheme = u.Scheme
+			req.URL.Host = u.Host
+			req.Host = u.Host
+			
+			// Preserve the original path and query
+			// req.URL.Path is already set from the original request
+		},
+		Transport: banTransport,
+		BufferPool: &sync.Pool{
+			New: func() interface{} {
+				return make([]byte, 32*1024) // 32KB buffer
+			},
+		},
+	}
+		log.Errorf("Handler is nil in banCheckTransport")
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
 	
 	proxy.Transport = banTransport
 
-	proxy.ServeHTTP(w, r)
+	// Additional safety check before calling ServeHTTP
+	if proxy.Director == nil {
+		log.Errorf("Proxy director is nil, cannot serve request")
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	// Add panic recovery for the proxy ServeHTTP call
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("Panic recovered in reverseProxy.ServeHTTP for %s %s: %v", r.Method, r.URL.Path, r)
+			// Try to write error response (it may fail if headers already sent)
+			defer func() { recover() }() // Ignore any panic from writing response
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		}
+	}()
+
+	// Create a copy of the request to avoid concurrent modification issues
+	reqCopy := r.Clone(r.Context())
+	if reqCopy == nil {
+		log.Errorf("Failed to clone request")
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	log.Debugf("About to call proxy.ServeHTTP for %s %s", reqCopy.Method, reqCopy.URL.Path)
+	proxy.ServeHTTP(w, reqCopy)
+	log.Debugf("Completed proxy.ServeHTTP for %s %s", reqCopy.Method, reqCopy.URL.Path)
 }
 
 func (s *Handler) returnEmptyResponse(w http.ResponseWriter, r *http.Request) {
@@ -286,12 +344,21 @@ func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		t.Transport = http.DefaultTransport
 	}
 
+	log.Debugf("Making round trip for %s %s", req.Method, req.URL.String())
+	
 	resp, err := t.Transport.RoundTrip(req)
+	
+	if err != nil {
+		log.Debugf("Round trip error: %v", err)
+	} else if resp != nil {
+		log.Debugf("Round trip response status: %d", resp.StatusCode)
+	}
 
 	// Check for bans
 	banDetector := service.GetBanDetector()
 	if banDetector != nil && banDetector.CheckResponse(t.class, resp, err) {
 		// API is now banned, return empty response instead
+		log.Debugf("API ban detected, closing response and returning empty")
 		if resp != nil {
 			resp.Body.Close()
 		}
