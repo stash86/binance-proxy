@@ -178,7 +178,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	if s.ctx != nil {
 		select {
 		case <-s.ctx.Done():
-			log.Warnf("Reverse proxy called but context is cancelled")
+			logOncePerDuration("warn", "Reverse proxy called but context is cancelled")
 			http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
 			return
 		default:
@@ -191,7 +191,8 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	if banDetector != nil && banDetector.IsBanned(s.class) {
 		banned, recoveryTime := banDetector.GetBanStatus(s.class)
 		if banned {
-			log.Warnf("%s API is banned, returning empty response. Recovery time: %v", s.class, recoveryTime)
+			msg := fmt.Sprintf("%s API is banned, returning empty response. Recovery time: %v", s.class, recoveryTime)
+			logOncePerDuration("warn", msg)
 			s.returnEmptyResponse(w, r)
 			return
 		}
@@ -218,7 +219,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if err != nil || u == nil {
-		log.Errorf("Failed to parse URL for %s: %v", s.class, err)
+		logOncePerDuration("error", fmt.Sprintf("Failed to parse URL for %s: %v", s.class, err))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -226,14 +227,14 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	// Use custom HTTP client with connection pooling
 	httpClient := getProxyHTTPClient()
 	if httpClient == nil {
-		log.Errorf("HTTP client is nil, cannot create proxy")
+		logOncePerDuration("error", "HTTP client is nil, cannot create proxy")
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	transport := httpClient.Transport
 	if transport == nil {
-		log.Errorf("HTTP transport is nil, using default transport")
+		logOncePerDuration("error", "HTTP transport is nil, using default transport")
 		transport = http.DefaultTransport
 	}
 
@@ -247,7 +248,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	
 	// Validate banTransport fields
 	if banTransport.handler == nil {
-		log.Errorf("Handler is nil in banCheckTransport")
+		logOncePerDuration("error", "Handler is nil in banCheckTransport")
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -274,7 +275,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	
 	// Additional safety check before calling ServeHTTP
 	if proxy.Director == nil {
-		log.Errorf("Proxy director is nil, cannot serve request")
+		logOncePerDuration("error", "Proxy director is nil, cannot serve request")
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -282,9 +283,8 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	// Add panic recovery for the proxy ServeHTTP call
 	defer func() {
 		if panicVal := recover(); panicVal != nil {
-			log.Errorf("Panic recovered in reverseProxy.ServeHTTP for %s %s: %v", r.Method, r.URL.Path, panicVal)
-			// Try to write error response (it may fail if headers already sent)
-			defer func() { recover() }() // Ignore any panic from writing response
+			logOncePerDuration("error", fmt.Sprintf("Panic recovered in reverseProxy.ServeHTTP for %s %s: %v", r.Method, r.URL.Path, panicVal))
+			defer func() { recover() }()
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 		}
 	}()
@@ -333,22 +333,19 @@ type banCheckTransport struct {
 func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Validate essential fields
 	if t == nil {
-		log.Errorf("banCheckTransport is nil")
+		logOncePerDuration("error", "banCheckTransport is nil")
 		return nil, fmt.Errorf("transport is nil")
 	}
-	
 	if t.handler == nil {
-		log.Errorf("Handler is nil in banCheckTransport")
+		logOncePerDuration("error", "Handler is nil in banCheckTransport")
 		return nil, fmt.Errorf("handler is nil")
 	}
-	
 	if req == nil {
-		log.Errorf("Request is nil in banCheckTransport")
+		logOncePerDuration("error", "Request is nil in banCheckTransport")
 		return nil, fmt.Errorf("request is nil")
 	}
-
 	if t.Transport == nil {
-		log.Errorf("Transport is nil in banCheckTransport, using default transport")
+		logOncePerDuration("error", "Transport is nil in banCheckTransport, using default transport")
 		t.Transport = http.DefaultTransport
 	}
 
@@ -365,19 +362,16 @@ func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	// Check for bans
 	banDetector := service.GetBanDetector()
 	if banDetector != nil && banDetector.CheckResponse(t.class, resp, err) {
-		// API is now banned, return empty response instead
-		log.Debugf("API ban detected, closing response and returning empty")
+		logOncePerDuration("warn", "API ban detected, closing response and returning empty")
 		if resp != nil {
 			resp.Body.Close()
 		}
-		
-		// Validate response writer before using it
 		if t.w != nil && t.r != nil && t.handler != nil {
 			t.handler.returnEmptyResponse(t.w, t.r)
 		} else {
-			log.Errorf("Cannot return empty response: w=%v, r=%v, handler=%v", t.w != nil, t.r != nil, t.handler != nil)
+			logOncePerDuration("error", fmt.Sprintf("Cannot return empty response: w=%v, r=%v, handler=%v", t.w != nil, t.r != nil, t.handler != nil))
 		}
-		return nil, nil // Don't return the actual error response
+		return nil, nil
 	}
 
 	return resp, err
@@ -470,4 +464,31 @@ func (s *Handler) restart(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(3 * time.Second)
 		log.Fatalf("Force restart for class %s", s.class)
 	}()
+}
+
+var (
+	logSuppressCache     = make(map[string]time.Time)
+	logSuppressCacheLock sync.Mutex
+	logSuppressDuration  = 2 * time.Minute // Change as needed
+)
+
+// logOncePerDuration logs a message only if it hasn't been logged in the last logSuppressDuration.
+func logOncePerDuration(level, msg string) {
+	logSuppressCacheLock.Lock()
+	defer logSuppressCacheLock.Unlock()
+	last, found := logSuppressCache[msg]
+	if found && time.Since(last) < logSuppressDuration {
+		return
+	}
+	logSuppressCache[msg] = time.Now()
+	switch level {
+	case "warn":
+		log.Warn(msg)
+	case "info":
+		log.Info(msg)
+	case "error":
+		log.Error(msg)
+	default:
+		log.Print(msg)
+	}
 }
