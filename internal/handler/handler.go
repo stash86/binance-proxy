@@ -148,7 +148,7 @@ func getProxyHTTPClient() *http.Client {
 	if ht, ok := transport.(*http.Transport); ok {
 		transport = ht.Clone()
 	}
-	
+
 	return &http.Client{
 		Transport: transport,
 		Timeout:   proxyHTTPClient.Timeout,
@@ -162,12 +162,12 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	
+
 	if w == nil {
 		log.Errorf("ResponseWriter is nil in reverseProxy")
 		return
 	}
-	
+
 	if r == nil {
 		log.Errorf("Request is nil in reverseProxy")
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -217,7 +217,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 		r.Host = "fapi.binance.com"
 		u, err = url.Parse("https://fapi.binance.com")
 	}
-	
+
 	if err != nil || u == nil {
 		logOncePerDuration("error", fmt.Sprintf("Failed to parse URL for %s: %v", s.class, err))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -245,7 +245,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 		w:         w,
 		r:         r,
 	}
-	
+
 	// Validate banTransport fields
 	if banTransport.handler == nil {
 		logOncePerDuration("error", "Handler is nil in banCheckTransport")
@@ -260,19 +260,19 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 				log.Errorf("Request is nil in proxy director")
 				return
 			}
-			
+
 			// Set the target URL
 			req.URL.Scheme = u.Scheme
 			req.URL.Host = u.Host
 			req.Host = u.Host
-			
+
 			// Preserve the original path and query
 			// req.URL.Path is already set from the original request
 		},
-		Transport: banTransport,
+		Transport:  banTransport,
 		BufferPool: &bufferPool{},
 	}
-	
+
 	// Additional safety check before calling ServeHTTP
 	if proxy.Director == nil {
 		logOncePerDuration("error", "Proxy director is nil, cannot serve request")
@@ -350,9 +350,9 @@ func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 
 	log.Debugf("Making round trip for %s %s", req.Method, req.URL.String())
-	
+
 	resp, err := t.Transport.RoundTrip(req)
-	
+
 	if err != nil {
 		log.Debugf("Round trip error: %v", err)
 	} else if resp != nil {

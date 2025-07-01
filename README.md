@@ -1,27 +1,32 @@
-<h1 align="center">  Binance Proxy</h1>
-<p align="center">
-A fast and simple <b>Websocket Proxy</b> for the <b>Binance API</b> written in <b>GoLang</b>. Mimics the behavior of API endpoints to avoid rate limiting imposed on IP's when using REST queries. Intended Usage for multiple instances of applications querying the Binance API at a rate that might lead to banning or blocking, like for example the <a href="https://github.com/freqtrade/freqtrade">Freqtrade Trading Bot</a>, or any other similar application. </p>
+# Binance Proxy
 
-<p align="center"><a href="https://github.com/stash86/binance-proxy/releases" target="_blank"><img src="https://img.shields.io/github/v/release/stash86/binance-proxy?style=for-the-badge" alt="latest version" /></a>&nbsp;<img src="https://img.shields.io/github/go-mod/go-version/stash86/binance-proxy?style=for-the-badge" alt="go version" />&nbsp;<img src="https://img.shields.io/tokei/lines/github/stash86/binance-proxy?color=pink&style=for-the-badge" />&nbsp;<a href="https://github.com/stash86/binance-proxy/issues" target="_blank"><img src="https://img.shields.io/github/issues/stash86/binance-proxy?color=purple&style=for-the-badge" alt="github issues" /></a>&nbsp;<img src="https://img.shields.io/github/license/stash86/binance-proxy?color=red&style=for-the-badge" alt="license" /></p>
+A fast and simple Websocket Proxy for the Binance API written in GoLang. Mimics the behavior of API endpoints to avoid rate limiting imposed on IP's when using REST queries. Intended Usage for multiple instances of applications querying the Binance API at a rate that might lead to banning or blocking, like for example the [Freqtrade Trading Bot](https://github.com/freqtrade/freqtrade), or any other similar application. </p>
 
 ## ⚡ Quick Start
+
 You can download the pre-compiled binary for the architecture of your choice from the [relaseses page](https://github.com/stash86/binance-proxy/releases) on GitHub.
 
 Unzip the package to a folder of choice, preferably one that's in `$PATH`
+
 ```bash
 tar -xf binance-proxy_1.0.2_Linux_x86_64.tar.gz -C /usr/local/bin 
 ```
+
 Starting the proxy:
+
 ```bash
 binance-proxy
 ```
+
 That's all you need to know to start! 🎉
 
 Once running, you can check the proxy status at:
+
 - SPOT: `http://localhost:8090/status`  
 - FUTURES: `http://localhost:8091/status`
 
 And restart the service remotely at:
+
 - SPOT: `http://localhost:8090/restart`
 - FUTURES: `http://localhost:8091/restart`
 
@@ -32,6 +37,7 @@ If you don't want to install or compile the binance-proxy to your system, feel f
 ```bash
 docker run --rm -d stash86/binance-proxy:latest
 ```
+
 ℹ️ Please pay attention to configuring network access, per default the ports `8090` and `8091` are exposed, if you specify different ports via parameters, you will need to re-configure your docker setup. Please refer to the [docker network documentation](https://docs.docker.com/network/), how to adjust this inside a container.
 
 ## ⚒️ Installing from source
@@ -45,8 +51,10 @@ go install github.com/stash86/binance-proxy/cmd/binance-proxy
 ```
 
 ## 📖 Basic Usage
+
 The proxy listens automatically on port **8090** for Spot markets, and port **8091** for Futures markets. Available options for parametrizations are available via `-h`
-```
+
+```text
 Usage:
   binance-proxy [OPTIONS]
 
@@ -62,7 +70,9 @@ Application Options:
 Help Options:
   -h, --help                   Show this help message
 ```
+
 ### 🪙 Example Usage with Freqtrade
+
 **Freqtrade** needs to be aware, that the **API endpoint** for querying the exchange is not the public endpoint, which is usually `https://api.binance.com` but instead queries are being proxied. To achieve that, the appropriate `config.json` needs to be adjusted in the `{ exchange: { urls: { api: public: "..."} } }` section.
 
 ```json
@@ -85,27 +95,31 @@ Help Options:
     }
 }
 ```
+
 This example assumes, that `binance-proxy` is running on the same host as the consuming application, thus `localhost` or `127.0.0.1` is used as the target address. Should `binance-proxy` run in a separate 🐳 **Docker** container, a separate instance or a k8s pod, the target address has to be replaced respectively, and it needs to be ensured that the required ports (8090/8091 per default) are opened for requests.
 
 ## ➡️ Supported API endpoints for caching
-| Endpoint | Market | Purpose |  Socket Update Interval | Comments |
-|----------|--------|---------|----------|---------|
-|`/api/v3/klines`<br/>`/fapi/v1/klines`| spot/futures | Kline/candlestick bars for a symbol|~ 2s|Websocket is closed if there is no following request after `2 * interval_time` (for example: A websocket for a symbol on `5m` timeframe is closed after 10 minutes.<br/><br/>Following requests for `klines` can not be delivered from the websocket cache:<br/><li>`limit` parameter is > 1000</ul><li>`startTime` or `endTime` have been specified</ul>|
-|`/api/v3/depth`<br/>`/fapi/v1/depth`|spot/futures|Order Book (Depth)|100ms|Websocket is closed if there is no following request after 2 minutes.<br/><br/>The `depth` endpoint serves only a maximum depth of 20.|
-|`/api/v3/ticker/24hr`|spot|24hr ticker price change statistics|2s/100ms (see comments)|Websocket is closed if there is no following request after 2 minutes.<br/><br/>For faster updates the values for <li>`lastPrice`</ul><li>`bidPrice`</ul><li>`askPrice`</ul><br>are taken from the `bookTicker` which is updated in an interval of 100ms.|
-|`/api/v3/exchangeInfo`<br/>`/fapi/v1/exchangeInfo`| spot/futures| Current exchange trading rules and symbol information|60s (see comments)|`exchangeInfo` is fetched periodically via REST every 60 seconds. It is not a websocket endpoint but just being cached during runtime.|
 
-> 🚨 Every **other** REST query to an endpoint is being **forwarded** 1:1 to the **API** at https://api.binance.com !
+| Endpoint | Market | Purpose | Socket Update Interval | Comments |
+|----------|--------|---------|-----------------------|----------|
+| `/api/v3/klines`, `/fapi/v1/klines` | spot/futures | Kline/candlestick bars for a symbol | ~2s | Websocket is closed if there is no following request after `2 * interval_time` (e.g., a websocket for a symbol on `5m` timeframe is closed after 10 minutes).  Following requests for `klines` cannot be delivered from the websocket cache: - `limit` parameter is > 1000 - `startTime` or `endTime` have been specified |
+| `/api/v3/depth`, `/fapi/v1/depth` | spot/futures | Order Book (Depth) | 100ms | Websocket is closed if there is no following request after 2 minutes.  The `depth` endpoint serves only a maximum depth of 20. |
+| `/api/v3/ticker/24hr` | spot | 24hr ticker price change statistics | 2s/100ms (see comments) | Websocket is closed if there is no following request after 2 minutes.  For faster updates, the values for `lastPrice`, `bidPrice`, and `askPrice` are taken from the `bookTicker` which is updated in an interval of 100ms. |
+| `/api/v3/exchangeInfo`, `/fapi/v1/exchangeInfo` | spot/futures | Current exchange trading rules and symbol information | 60s (see comments) | `exchangeInfo` is fetched periodically via REST every 60 seconds. It is not a websocket endpoint but just being cached during runtime. |
+
+> 🚨 Every **other** REST query to an endpoint is being **forwarded** 1:1 to the **API** at <https://api.binance.com> !
 
 ## 📊 Status Endpoint
 
 The proxy includes a built-in status endpoint to monitor the health and performance of the service:
 
 ### 🔍 Accessing the Status
+
 - **SPOT markets**: `http://localhost:8090/status`
 - **FUTURES markets**: `http://localhost:8091/status`
 
 ### 📈 Status Information
+
 The status endpoint provides comprehensive information about the proxy service:
 
 ```json
@@ -135,6 +149,7 @@ The status endpoint provides comprehensive information about the proxy service:
 ```
 
 ### 📋 Status Fields
+
 | Field | Description |
 |-------|-------------|
 | `service` | Service name identifier |
@@ -150,6 +165,7 @@ The status endpoint provides comprehensive information about the proxy service:
 | `recovery_time` | Expected recovery time if banned |
 
 ### 🔧 Usage Examples
+
 ```bash
 # Check SPOT market status
 curl http://localhost:8090/status
@@ -166,10 +182,12 @@ watch -n 5 "curl -s http://localhost:8090/status | jq"
 The proxy includes a restart endpoint for remote service management:
 
 ### 🚀 Accessing the Restart
+
 - **SPOT markets**: `http://localhost:8090/restart`
 - **FUTURES markets**: `http://localhost:8091/restart`
 
 ### ⚡ Restart Response
+
 ```json
 {
   "message": "Restart initiated",
@@ -181,6 +199,7 @@ The proxy includes a restart endpoint for remote service management:
 ```
 
 ### 🔧 How It Works
+
 1. **Immediate response** sent to confirm restart initiation
 2. **2-second delay** to ensure response is delivered
 3. **Graceful shutdown** of the current process
@@ -189,6 +208,7 @@ The proxy includes a restart endpoint for remote service management:
 ### 🐳 Docker Setup for Automatic Restart
 
 #### **Basic Setup (Recommended)**
+
 ```yaml
 version: '3.8'
 services:
@@ -201,6 +221,7 @@ services:
 ```
 
 #### **Advanced Setup with Health Monitoring**
+
 ```yaml
 version: '3.8'
 services:
@@ -219,6 +240,7 @@ services:
 ```
 
 #### **Complete Setup with Auto-Heal (Restart on Health Failure)**
+
 ```yaml
 version: '3.8'
 services:
@@ -248,6 +270,7 @@ services:
 ```
 
 #### **Restart Policy Options**
+
 | Policy | Description | Use Case |
 |--------|-------------|----------|
 | `no` | Never restart (default) | Development/testing |
@@ -258,17 +281,20 @@ services:
 #### **What Each Setup Provides**
 
 **Basic Setup:**
+
 - ✅ **Manual restart** via `/restart` endpoint works
 - ✅ **Automatic restart** if container crashes
 - ✅ **Survives Docker daemon restarts**
 
 **Health Monitoring Setup:**
+
 - ✅ All basic features
 - ✅ **Health status** visible in `docker-compose ps`
 - ✅ **Monitor service health** over time
 - ❌ No automatic restart on health failure
 
 **Complete Auto-Heal Setup:**
+
 - ✅ All previous features
 - ✅ **Automatic restart** when health checks fail
 - ✅ **Full automation** - handles crashes AND hangs
@@ -277,6 +303,7 @@ services:
 ### 🖥️ Non-Docker Automatic Restart Setup
 
 #### **Linux - Systemd (Recommended)**
+
 Create a systemd service file:
 
 ```bash
@@ -318,6 +345,7 @@ sudo systemctl status binance-proxy
 ```
 
 #### **Windows - NSSM (Non-Sucking Service Manager)**
+
 ```powershell
 # Download and install NSSM
 # https://nssm.cc/download
@@ -337,6 +365,7 @@ nssm start BinanceProxy
 ```
 
 #### **Linux - Supervisor**
+
 ```bash
 # Install supervisor
 sudo apt-get install supervisor
@@ -366,6 +395,7 @@ sudo supervisorctl start binance-proxy
 ```
 
 #### **macOS - LaunchDaemon**
+
 ```bash
 # Create launchd plist
 sudo nano /Library/LaunchDaemons/com.binance.proxy.plist
@@ -410,6 +440,7 @@ sudo launchctl start com.binance.proxy
 | **LaunchDaemon** | macOS | Medium | ✅ System integration | ✅ Good |
 
 #### **Manual Script Alternative (Basic)**
+
 For development or simple setups:
 
 ```bash
@@ -430,12 +461,14 @@ nohup ./restart-loop.sh > proxy.log 2>&1 &
 ```
 
 ### ⚠️ Important Notes
+
 - **Security**: No authentication required - restrict network access in production
 - **Scope**: Restarting either port restarts the entire service (both SPOT and FUTURES)
 - **Downtime**: Expect 10-15 seconds total restart time
 - **Fresh State**: Complete reset of connections, caches, and statistics
 
-### 🔧 Usage Examples
+### 🔧 Restart Usage Examples
+
 ```bash
 # Restart from command line
 curl http://localhost:8090/restart
@@ -444,10 +477,10 @@ curl http://localhost:8090/restart
 # http://localhost:8090/restart
 ```
 
-
 ## ⚙️ Commands & Options
 
 The following parameters are available to control the behavior of **binance-proxy**:
+
 ```bash
 binance-proxy [OPTION]
 ```
@@ -463,17 +496,18 @@ binance-proxy [OPTION]
 | `-f`   |`$BPX_DISABLE_FUTURES`| Disables proxy for **FUTURES** markets. | `bool` | `false` | No        |
 | `-a`   |`$BPX_ALWAYS_SHOW_FORWARDS`| Always show requests forwarded via REST even if verbose is disabled | `bool` | `false` | No        |
 
-Instead of using command line switches environment variables can be used, there are several ways how those can be implemented. For example `.env` files could be used in combination with `docker-compose`. 
+Instead of using command line switches environment variables can be used, there are several ways how those can be implemented. For example `.env` files could be used in combination with `docker-compose`.
 
-Passing variables to a docker container can also be achieved in different ways, please see the documentation for all available options [here](https://docs.docker.com/compose/environment-variables/).
+Passing variables to a docker container can also be achieved in different ways, please see the documentation for all available options [in this page](https://docs.docker.com/compose/environment-variables/).
 
 ## 🐞 Bug / Feature Request
 
-If you find a bug (the proxy couldn't handle the query and / or gave undesired results), kindly open an issue [here](https://github.com/stash86/binance-proxy/issues/new) by including a **logfile** and a **meaningful description** of the problem.
+If you find a bug (the proxy couldn't handle the query and / or gave undesired results), kindly open an issue [at github repo](https://github.com/stash86/binance-proxy/issues/new) by including a **logfile** and a **meaningful description** of the problem.
 
-If you'd like to request a new function, feel free to do so by opening an issue [here](https://github.com/stash86/binance-proxy/issues/new). 
+If you'd like to request a new function, feel free to do so by opening an issue [at github repo](https://github.com/stash86/binance-proxy/issues/new).
 
 ## 💻 Development
+
 Want to contribute? **Great!🥳**
 
 To fix a bug or enhance an existing module, follow these steps:
@@ -487,20 +521,23 @@ To fix a bug or enhance an existing module, follow these steps:
 - Create a Pull Request
 
 ## 🙏 Credits
-+ [@adrianceding](https://github.com/adrianceding) for creating the original version, available [here](https://github.com/adrianceding/binance-proxy).
+
+- [@adrianceding](https://github.com/adrianceding) for creating the original version, available [at this repo](https://github.com/adrianceding/binance-proxy).
 
 ## ⚠️ License
 
-`binance-proxy` is free and open-source software licensed under the [MIT License](https://github.com/stash86/binance-proxy/blob/main/LICENSE). 
+`binance-proxy` is free and open-source software licensed under the [MIT License](https://github.com/stash86/binance-proxy/blob/main/LICENSE).
 
 By submitting a pull request to this project, you agree to license your contribution under the MIT license to this project.
 
 ### 🧬 Third-party library licenses
-+ [go-binance](https://github.com/adshao/go-binance/blob/master/LICENSE)
-+ [go-flags](https://github.com/jessevdk/go-flags/blob/master/LICENSE)
-+ [logrus](https://github.com/sirupsen/logrus/blob/master/LICENSE)
-+ [go-time](https://cs.opensource.google/go/x/time/+/master:LICENSE)
-+ [go-simplejson](https://github.com/bitly/go-simplejson/blob/master/LICENSE)
-+ [websocket](https://github.com/gorilla/websocket/blob/master/LICENSE)
-+ [objx](https://github.com/stretchr/objx/blob/master/LICENSE)
-+ [testify](https://github.com/stretchr/testify/blob/master/LICENSE)
+
+- [go-binance](https://github.com/adshao/go-binance/blob/master/LICENSE)
+
+- [go-flags](https://github.com/jessevdk/go-flags/blob/master/LICENSE)
+- [logrus](https://github.com/sirupsen/logrus/blob/master/LICENSE)
+- [go-time](https://cs.opensource.google/go/x/time/+/master:LICENSE)
+- [go-simplejson](https://github.com/bitly/go-simplejson/blob/master/LICENSE)
+- [websocket](https://github.com/gorilla/websocket/blob/master/LICENSE)
+- [objx](https://github.com/stretchr/objx/blob/master/LICENSE)
+- [testify](https://github.com/stretchr/testify/blob/master/LICENSE)
