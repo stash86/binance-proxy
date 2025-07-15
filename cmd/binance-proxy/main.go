@@ -51,8 +51,8 @@ type Config struct {
 var (
 	config      Config
 	parser             = flags.NewParser(&config, flags.Default)
-	Version     string = "develop"
-	Buildtime   string = "undefined"
+	Version     string = "1.0.4"
+	Buildtime   string = "2025-07-15"
 	ctx, cancel        = context.WithCancel(context.Background())
 )
 
