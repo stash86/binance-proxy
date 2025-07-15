@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,14 +24,15 @@ type bufferPool struct {
 func (bp *bufferPool) Get() []byte {
 	if bp.pool.New == nil {
 		bp.pool.New = func() interface{} {
-			return make([]byte, 32*1024) // 32KB buffer
+			buf := make([]byte, 32*1024) // 32KB buffer
+			return &buf
 		}
 	}
-	return bp.pool.Get().([]byte)
+	return *(bp.pool.Get().(*[]byte))
 }
 
 func (bp *bufferPool) Put(b []byte) {
-	bp.pool.Put(b)
+	bp.pool.Put(&b)
 }
 
 func NewHandler(ctx context.Context, class service.Class, enableFakeKline bool, alwaysShowForwards bool) func(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +65,7 @@ func (s *Handler) Router(w http.ResponseWriter, r *http.Request) {
 	statusTracker.RecordRequest()
 	switch r.URL.Path {
 	case "/status":
-		s.status(w, r)
+		s.status(w)
 
 	case "/restart":
 		s.restart(w, r)
@@ -103,11 +106,6 @@ func getProxyHTTPClient() *http.Client {
 			ForceAttemptHTTP2:   true,
 			// Connection pooling settings for high throughput
 			MaxConnsPerHost: 50,
-		}
-
-		if transport == nil {
-			log.Errorf("Failed to create HTTP transport, using default")
-			transport = http.DefaultTransport.(*http.Transport).Clone()
 		}
 
 		proxyHTTPClient = &http.Client{
@@ -377,7 +375,7 @@ func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return resp, err
 }
 
-func (s *Handler) status(w http.ResponseWriter, r *http.Request) {
+func (s *Handler) status(w http.ResponseWriter) {
 	// Check if context is still valid
 	select {
 	case <-s.ctx.Done():
@@ -470,17 +468,29 @@ var (
 	logSuppressCache     = make(map[string]time.Time)
 	logSuppressCacheLock sync.Mutex
 	logSuppressDuration  = 2 * time.Minute // Change as needed
+
+	normalizeNumberRegexp = regexp.MustCompile(`\b\d+(?:\.\d+)?\b`)
+	normalizeQuotedRegexp = regexp.MustCompile(`"[^"]*"`)
+	normalizeTimeRegexp   = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?`)
 )
+
+func normalizeLogMsg(msg string) string {
+	msg = normalizeQuotedRegexp.ReplaceAllString(msg, "\"?\"")
+	msg = normalizeTimeRegexp.ReplaceAllString(msg, "?")
+	msg = normalizeNumberRegexp.ReplaceAllString(msg, "?")
+	return strings.TrimSpace(msg)
+}
 
 // logOncePerDuration logs a message only if it hasn't been logged in the last logSuppressDuration.
 func logOncePerDuration(level, msg string) {
+	key := normalizeLogMsg(msg)
 	logSuppressCacheLock.Lock()
 	defer logSuppressCacheLock.Unlock()
-	last, found := logSuppressCache[msg]
+	last, found := logSuppressCache[key]
 	if found && time.Since(last) < logSuppressDuration {
 		return
 	}
-	logSuppressCache[msg] = time.Now()
+	logSuppressCache[key] = time.Now()
 	switch level {
 	case "warn":
 		log.Warn(msg)
