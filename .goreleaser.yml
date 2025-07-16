@@ -29,7 +29,7 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
-    format_overrides:
+    overrides:
       - goos: linux
         format: tar.gz
       - goos: darwin
@@ -38,14 +38,14 @@ archives:
         format: zip
 
 checksum:
-  name_template: 'checksums.txt'
+  name_template: "checksums.txt"
 
 changelog:
   sort: asc
   filters:
     exclude:
-      - '^docs:'
-      - '^test:'
+      - "^docs:"
+      - "^test:"
 
 dockers:
   - image_templates:
@@ -59,10 +59,10 @@ dockers:
       - "--label=org.opencontainers.image.url=https://github.com/stash86/{{ .ProjectName }}"
       - "--label=org.opencontainers.image.source=https://github.com/stash86/{{ .ProjectName }}"
       - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.created={{ time \"2006-01-02T15:04:05Z07:00\" }}"
+      - '--label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}'
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=MIT"
-      
+
   - image_templates:
       - "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}-arm64v8"
     goarch: arm64
@@ -75,7 +75,7 @@ dockers:
       - "--label=org.opencontainers.image.url=https://github.com/stash86/{{ .ProjectName }}"
       - "--label=org.opencontainers.image.source=https://github.com/stash86/{{ .ProjectName }}"
       - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.created={{ time \"2006-01-02T15:04:05Z07:00\" }}"
+      - '--label=org.opencontainers.image.created={{ time "2006-01-02T15:04:05Z07:00" }}'
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=MIT"
 
@@ -84,7 +84,7 @@ docker_manifests:
     image_templates:
       - "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}-amd64"
       - "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}-arm64v8"
-      
+
   - name_template: "docker.io/stash86/{{ .ProjectName }}:latest"
     image_templates:
       - "docker.io/stash86/{{ .ProjectName }}:{{ .Version }}-amd64"

@@ -91,8 +91,16 @@ func (s *Handler) Router(w http.ResponseWriter, r *http.Request) {
 
 // HTTP client with connection pooling for reverse proxy
 var (
-	proxyHTTPClientOnce sync.Once
-	proxyHTTPClient     *http.Client
+	logSuppressCache     = make(map[string]time.Time)
+	logSuppressCacheLock sync.Mutex
+	logSuppressDuration  = 2 * time.Minute // Change as needed
+
+	// More aggressive normalization: remove all numbers, quoted strings, timestamps, and collapse whitespace
+	normalizeNumberRegexp    = regexp.MustCompile(`[0-9]+(\.[0-9]+)?`)
+	normalizeTimestampRegexp = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?`)
+	normalizeQuotedRegexp    = regexp.MustCompile(`"[^"]*"`)
+	proxyHTTPClientOnce      sync.Once
+	proxyHTTPClient          *http.Client
 )
 
 func getProxyHTTPClient() *http.Client {
@@ -464,21 +472,16 @@ func (s *Handler) restart(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-var (
-	logSuppressCache     = make(map[string]time.Time)
-	logSuppressCacheLock sync.Mutex
-	logSuppressDuration  = 2 * time.Minute // Change as needed
-
-	normalizeNumberRegexp = regexp.MustCompile(`\b\d+(?:\.\d+)?\b`)
-	normalizeQuotedRegexp = regexp.MustCompile(`"[^"]*"`)
-	normalizeTimeRegexp   = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?`)
-)
-
 func normalizeLogMsg(msg string) string {
-	msg = normalizeQuotedRegexp.ReplaceAllString(msg, "\"?\"")
-	msg = normalizeTimeRegexp.ReplaceAllString(msg, "?")
-	msg = normalizeNumberRegexp.ReplaceAllString(msg, "?")
-	return strings.TrimSpace(msg)
+	// Remove quoted strings
+	msg = normalizeQuotedRegexp.ReplaceAllString(msg, "")
+	// Remove timestamps
+	msg = normalizeTimestampRegexp.ReplaceAllString(msg, "")
+	// Remove all numbers (including decimals)
+	msg = normalizeNumberRegexp.ReplaceAllString(msg, "")
+	// Collapse whitespace
+	msg = strings.Join(strings.Fields(msg), " ")
+	return msg
 }
 
 // logOncePerDuration logs a message only if it hasn't been logged in the last logSuppressDuration.
