@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"binance-proxy/internal/logcache"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -99,7 +102,7 @@ func (bd *BanDetector) CheckResponse(class Class, resp *http.Response, err error
 			waitTime := bd.getWeightResetTime()
 			if waitTime > 0 {
 				bd.setBanned(class, now.Add(waitTime))
-				log.Warnf("%s API weight limit approaching, suspending requests until %v", class, bd.getRecoveryTime(class))
+				logcache.LogOncePerDuration("warn", fmt.Sprintf("%s API weight limit approaching, suspending requests until %v", class, bd.getRecoveryTime(class)))
 				return true
 			}
 		}

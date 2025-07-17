@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"binance-proxy/internal/logcache"
 	"binance-proxy/internal/service"
 	"context"
 	"encoding/json"
@@ -8,8 +9,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -91,16 +90,8 @@ func (s *Handler) Router(w http.ResponseWriter, r *http.Request) {
 
 // HTTP client with connection pooling for reverse proxy
 var (
-	logSuppressCache     = make(map[string]time.Time)
-	logSuppressCacheLock sync.Mutex
-	logSuppressDuration  = 2 * time.Minute // Change as needed
-
-	// More aggressive normalization: remove all numbers, quoted strings, timestamps, and collapse whitespace
-	normalizeNumberRegexp    = regexp.MustCompile(`[0-9]+(\.[0-9]+)?`)
-	normalizeTimestampRegexp = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?`)
-	normalizeQuotedRegexp    = regexp.MustCompile(`"[^"]*"`)
-	proxyHTTPClientOnce      sync.Once
-	proxyHTTPClient          *http.Client
+	proxyHTTPClientOnce sync.Once
+	proxyHTTPClient     *http.Client
 )
 
 func getProxyHTTPClient() *http.Client {
@@ -184,7 +175,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	if s.ctx != nil {
 		select {
 		case <-s.ctx.Done():
-			logOncePerDuration("warn", "Reverse proxy called but context is cancelled")
+			logcache.LogOncePerDuration("warn", "Reverse proxy called but context is cancelled")
 			http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
 			return
 		default:
@@ -198,7 +189,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 		banned, recoveryTime := banDetector.GetBanStatus(s.class)
 		if banned {
 			msg := fmt.Sprintf("%s API is banned, returning empty response. Recovery time: %v", s.class, recoveryTime)
-			logOncePerDuration("warn", msg)
+			logcache.LogOncePerDuration("warn", msg)
 			s.returnEmptyResponse(w, r)
 			return
 		}
@@ -225,7 +216,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil || u == nil {
-		logOncePerDuration("error", fmt.Sprintf("Failed to parse URL for %s: %v", s.class, err))
+		logcache.LogOncePerDuration("error", fmt.Sprintf("Failed to parse URL for %s: %v", s.class, err))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -233,14 +224,14 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	// Use custom HTTP client with connection pooling
 	httpClient := getProxyHTTPClient()
 	if httpClient == nil {
-		logOncePerDuration("error", "HTTP client is nil, cannot create proxy")
+		logcache.LogOncePerDuration("error", "HTTP client is nil, cannot create proxy")
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	transport := httpClient.Transport
 	if transport == nil {
-		logOncePerDuration("error", "HTTP transport is nil, using default transport")
+		logcache.LogOncePerDuration("error", "HTTP transport is nil, using default transport")
 		transport = http.DefaultTransport
 	}
 
@@ -254,7 +245,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Validate banTransport fields
 	if banTransport.handler == nil {
-		logOncePerDuration("error", "Handler is nil in banCheckTransport")
+		logcache.LogOncePerDuration("error", "Handler is nil in banCheckTransport")
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -281,7 +272,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 
 	// Additional safety check before calling ServeHTTP
 	if proxy.Director == nil {
-		logOncePerDuration("error", "Proxy director is nil, cannot serve request")
+		logcache.LogOncePerDuration("error", "Proxy director is nil, cannot serve request")
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -289,7 +280,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 	// Add panic recovery for the proxy ServeHTTP call
 	defer func() {
 		if panicVal := recover(); panicVal != nil {
-			logOncePerDuration("error", fmt.Sprintf("Panic recovered in reverseProxy.ServeHTTP for %s %s: %v", r.Method, r.URL.Path, panicVal))
+			logcache.LogOncePerDuration("error", fmt.Sprintf("Panic recovered in reverseProxy.ServeHTTP for %s %s: %v", r.Method, r.URL.Path, panicVal))
 			defer func() { recover() }()
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 		}
@@ -339,19 +330,19 @@ type banCheckTransport struct {
 func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Validate essential fields
 	if t == nil {
-		logOncePerDuration("error", "banCheckTransport is nil")
+		logcache.LogOncePerDuration("error", "banCheckTransport is nil")
 		return nil, fmt.Errorf("transport is nil")
 	}
 	if t.handler == nil {
-		logOncePerDuration("error", "Handler is nil in banCheckTransport")
+		logcache.LogOncePerDuration("error", "Handler is nil in banCheckTransport")
 		return nil, fmt.Errorf("handler is nil")
 	}
 	if req == nil {
-		logOncePerDuration("error", "Request is nil in banCheckTransport")
+		logcache.LogOncePerDuration("error", "Request is nil in banCheckTransport")
 		return nil, fmt.Errorf("request is nil")
 	}
 	if t.Transport == nil {
-		logOncePerDuration("error", "Transport is nil in banCheckTransport, using default transport")
+		logcache.LogOncePerDuration("error", "Transport is nil in banCheckTransport, using default transport")
 		t.Transport = http.DefaultTransport
 	}
 
@@ -368,14 +359,14 @@ func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	// Check for bans
 	banDetector := service.GetBanDetector()
 	if banDetector != nil && banDetector.CheckResponse(t.class, resp, err) {
-		logOncePerDuration("warn", "API ban detected, closing response and returning empty")
+		logcache.LogOncePerDuration("warn", "API ban detected, closing response and returning empty")
 		if resp != nil {
 			resp.Body.Close()
 		}
 		if t.w != nil && t.r != nil && t.handler != nil {
 			t.handler.returnEmptyResponse(t.w, t.r)
 		} else {
-			logOncePerDuration("error", fmt.Sprintf("Cannot return empty response: w=%v, r=%v, handler=%v", t.w != nil, t.r != nil, t.handler != nil))
+			logcache.LogOncePerDuration("error", fmt.Sprintf("Cannot return empty response: w=%v, r=%v, handler=%v", t.w != nil, t.r != nil, t.handler != nil))
 		}
 		return nil, nil
 	}
@@ -470,38 +461,4 @@ func (s *Handler) restart(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(3 * time.Second)
 		log.Fatalf("Force restart for class %s", s.class)
 	}()
-}
-
-func normalizeLogMsg(msg string) string {
-	// Remove quoted strings
-	msg = normalizeQuotedRegexp.ReplaceAllString(msg, "")
-	// Remove timestamps
-	msg = normalizeTimestampRegexp.ReplaceAllString(msg, "")
-	// Remove all numbers (including decimals)
-	msg = normalizeNumberRegexp.ReplaceAllString(msg, "")
-	// Collapse whitespace
-	msg = strings.Join(strings.Fields(msg), " ")
-	return msg
-}
-
-// logOncePerDuration logs a message only if it hasn't been logged in the last logSuppressDuration.
-func logOncePerDuration(level, msg string) {
-	key := normalizeLogMsg(msg)
-	logSuppressCacheLock.Lock()
-	defer logSuppressCacheLock.Unlock()
-	last, found := logSuppressCache[key]
-	if found && time.Since(last) < logSuppressDuration {
-		return
-	}
-	logSuppressCache[key] = time.Now()
-	switch level {
-	case "warn":
-		log.Warn(msg)
-	case "info":
-		log.Info(msg)
-	case "error":
-		log.Error(msg)
-	default:
-		log.Print(msg)
-	}
 }
