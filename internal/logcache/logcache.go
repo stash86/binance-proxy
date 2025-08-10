@@ -1,6 +1,7 @@
 package logcache
 
 import (
+	"io"
 	"log"
 	"regexp"
 	"strings"
@@ -46,4 +47,30 @@ func LogOncePerDuration(level, msg string) {
 	default:
 		log.Print(msg)
 	}
+}
+
+// suppressingWriter wraps an io.Writer and suppresses repeated/similar lines
+// within SuppressDuration using the same normalization as above.
+type suppressingWriter struct {
+	next io.Writer
+}
+
+// NewSuppressingWriter returns an io.Writer suitable for net/http Server.ErrorLog.SetOutput.
+func NewSuppressingWriter(next io.Writer) io.Writer {
+	return &suppressingWriter{next: next}
+}
+
+func (w *suppressingWriter) Write(p []byte) (int, error) {
+	msg := string(p)
+	key := Normalize(msg)
+	cacheLock.Lock()
+	last, found := cache[key]
+	if found && time.Since(last) < SuppressDuration {
+		cacheLock.Unlock()
+		// Pretend we wrote it to avoid backpressure; drop the line.
+		return len(p), nil
+	}
+	cache[key] = time.Now()
+	cacheLock.Unlock()
+	return w.next.Write(p)
 }

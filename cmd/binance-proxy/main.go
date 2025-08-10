@@ -2,9 +2,11 @@ package main
 
 import (
 	"binance-proxy/internal/handler"
+	"binance-proxy/internal/logcache"
 	"binance-proxy/internal/service"
 	"context"
 	"fmt"
+	stdlog "log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,8 +23,18 @@ func startProxy(ctx context.Context, port int, class service.Class, disablefakek
 	address := fmt.Sprintf(":%d", port)
 	mux.HandleFunc("/", handler.NewHandler(ctx, class, !disablefakekline, alwaysshowforwards))
 
+	// Create an HTTP server with a custom ErrorLog that suppresses repeated lines
+	srv := &http.Server{
+		Addr:    address,
+		Handler: mux,
+		ErrorLog: stdlog.New(
+			logcache.NewSuppressingWriter(os.Stderr),
+			"", stdlog.LstdFlags,
+		),
+	}
+
 	log.Infof("%s websocket proxy starting on port %d.", class, port)
-	if err := http.ListenAndServe(address, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("%s websocket proxy start failed (error: %s).", class, err)
 	}
 }

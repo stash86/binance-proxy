@@ -3,9 +3,11 @@ package handler
 import (
 	"binance-proxy/internal/logcache"
 	"binance-proxy/internal/service"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -359,16 +361,34 @@ func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	// Check for bans
 	banDetector := service.GetBanDetector()
 	if banDetector != nil && banDetector.CheckResponse(t.class, resp, err) {
-		logcache.LogOncePerDuration("warn", "API ban detected, closing response and returning empty")
+		logcache.LogOncePerDuration("warn", "API ban detected, returning synthetic empty response")
 		if resp != nil {
 			resp.Body.Close()
 		}
-		if t.w != nil && t.r != nil && t.handler != nil {
-			t.handler.returnEmptyResponse(t.w, t.r)
-		} else {
-			logcache.LogOncePerDuration("error", fmt.Sprintf("Cannot return empty response: w=%v, r=%v, handler=%v", t.w != nil, t.r != nil, t.handler != nil))
+		// Build a synthetic empty response so ReverseProxy can forward it cleanly
+		var body []byte
+		switch req.URL.Path {
+		case "/api/v3/klines", "/fapi/v1/klines":
+			body = []byte("[]")
+		case "/api/v3/depth", "/fapi/v1/depth":
+			body = []byte(`{"lastUpdateId":0,"bids":[],"asks":[]}`)
+		case "/api/v3/ticker/24hr":
+			body = []byte("{}")
+		default:
+			body = []byte("{}")
 		}
-		return nil, nil
+		hdr := make(http.Header)
+		hdr.Set("Content-Type", "application/json")
+		hdr.Set("Data-Source", "ban-protection")
+		synth := &http.Response{
+			Status:        "200 OK",
+			StatusCode:    http.StatusOK,
+			Header:        hdr,
+			Body:          io.NopCloser(bytes.NewReader(body)),
+			ContentLength: int64(len(body)),
+			Request:       req,
+		}
+		return synth, nil
 	}
 
 	return resp, err
