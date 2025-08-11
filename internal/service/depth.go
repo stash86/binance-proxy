@@ -56,6 +56,8 @@ func (s *DepthSrv) Start() {
 			}
 
 			log.Debugf("%s %s depth websocket connected.", s.si.Class, s.si.Symbol)
+			// Reset the reconnect backoff now that we have a successful connection
+			d.Reset()
 			select {
 			case <-s.ctx.Done():
 				stopC <- struct{}{}
@@ -126,9 +128,14 @@ func (s *DepthSrv) wsHandler(event *spot.WsPartialDepthEvent) {
 }
 
 func (s *DepthSrv) errHandler(err error) {
-	if strings.Contains(err.Error(), "context canceled") {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "context canceled"):
 		log.Warnf("%s %s depth websocket context canceled, will restart connection.", s.si.Class, s.si.Symbol)
-	} else {
+	case strings.Contains(msg, "use of closed network connection"):
+		// This commonly indicates a normal remote close/rotation; treat as info/debug to reduce noise
+		log.Infof("%s %s depth websocket closed by peer; reconnecting.", s.si.Class, s.si.Symbol)
+	default:
 		log.Errorf("%s %s depth websocket connection error: %s.", s.si.Class, s.si.Symbol, err)
 	}
 }
