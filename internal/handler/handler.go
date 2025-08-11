@@ -36,6 +36,13 @@ func (bp *bufferPool) Put(b []byte) {
 	bp.pool.Put(&b)
 }
 
+// roundTripperFunc allows defining a RoundTripper from a function.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 func NewHandler(ctx context.Context, class service.Class, enableFakeKline bool, alwaysShowForwards bool) func(w http.ResponseWriter, r *http.Request) {
 	handler := &Handler{
 		srv:                service.NewService(ctx, class),
@@ -237,20 +244,29 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 		transport = http.DefaultTransport
 	}
 
-	banTransport := &banCheckTransport{
-		Transport: transport,
-		class:     s.class,
-		handler:   s,
-		w:         w,
-		r:         r,
-	}
-
-	// Validate banTransport fields
-	if banTransport.handler == nil {
-		logcache.LogOncePerDuration("error", "Handler is nil in banCheckTransport")
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
+	// Use ReverseProxy hooks instead of a custom RoundTripper for ban handling.
+	// Wrap transport to be context-aware and fail fast on canceled requests.
+	baseTransport := transport
+	contextAwareTransport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req == nil {
+			return nil, fmt.Errorf("nil request")
+		}
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		default:
+		}
+		return baseTransport.RoundTrip(req)
+	})
+	// IMPORTANT:
+	// - Do NOT write to the ResponseWriter from RoundTrip; it can cause
+	//   ReverseProxy to see a nil *http.Response and trigger panics or
+	//   duplicate WriteHeader logs. Instead, either:
+	//   * return a synthetic *http.Response from RoundTrip, or
+	//   * prefer ReverseProxy.ModifyResponse and ReverseProxy.ErrorHandler
+	//     (as implemented below) which integrate cleanly with its flow.
+	// - returnEmptyResponse is only safe to call from handler paths, not from
+	//   inside a RoundTripper.
 
 	// Create a fresh reverse proxy for each request to avoid shared state issues
 	proxy := &httputil.ReverseProxy{
@@ -268,8 +284,68 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 			// Preserve the original path and query
 			// req.URL.Path is already set from the original request
 		},
-		Transport:  banTransport,
+		Transport:  contextAwareTransport,
 		BufferPool: &bufferPool{},
+		ModifyResponse: func(resp *http.Response) error {
+			bd := service.GetBanDetector()
+			if bd != nil && bd.CheckResponse(s.class, resp, nil) {
+				if resp.Body != nil {
+					resp.Body.Close()
+				}
+				var body []byte
+				switch resp.Request.URL.Path {
+				case "/api/v3/klines", "/fapi/v1/klines":
+					body = []byte("[]")
+				case "/api/v3/depth", "/fapi/v1/depth":
+					body = []byte(`{"lastUpdateId":0,"bids":[],"asks":[]}`)
+				case "/api/v3/ticker/24hr":
+					body = []byte("{}")
+				default:
+					body = []byte("{}")
+				}
+				resp.Header.Set("Content-Type", "application/json")
+				resp.Header.Set("Data-Source", "ban-protection")
+				resp.Header.Set("Cache-Control", "no-store")
+				// Prefer non-200 to instruct clients to back off
+				// Use 429 Too Many Requests with Retry-After when ban/limit detected
+				resp.StatusCode = http.StatusTooManyRequests
+				resp.Status = "429 Too Many Requests"
+				// Populate Retry-After based on ban detector recovery time if available
+				if banned, until := bd.GetBanStatus(s.class); banned {
+					secs := int(time.Until(until).Seconds())
+					if secs < 1 {
+						secs = 30
+					}
+					resp.Header.Set("Retry-After", fmt.Sprintf("%d", secs))
+					resp.Header.Set("X-Backoff-Until", until.Format(time.RFC3339))
+				}
+				resp.Header.Set("X-Proxy-Empty", "1")
+				resp.Body = io.NopCloser(bytes.NewReader(body))
+				resp.ContentLength = int64(len(body))
+				resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+				logcache.LogOncePerDuration("warn", fmt.Sprintf("%s API banned/limited; returned synthetic response", s.class))
+			}
+			return nil
+		},
+		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
+			// Always log via logcache to avoid noisy net/http defaults
+			logcache.LogOncePerDuration("error", fmt.Sprintf("%s proxy transport error: %v", s.class, err))
+
+			// If ban detector suggests a backoff, reuse the synthetic empty path
+			bd := service.GetBanDetector()
+			if bd != nil && bd.CheckResponse(s.class, nil, err) {
+				logcache.LogOncePerDuration("warn", fmt.Sprintf("%s API transport error treated as ban", s.class))
+				s.returnEmptyResponse(rw, req)
+				return
+			}
+
+			// Otherwise, send a single controlled JSON 502 response
+			rw.Header().Set("Content-Type", "application/json")
+			rw.Header().Set("Cache-Control", "no-store")
+			rw.Header().Set("Data-Source", "proxy-error")
+			rw.WriteHeader(http.StatusBadGateway)
+			_, _ = rw.Write([]byte(`{"error":"bad_gateway","message":"upstream fetch failed"}`))
+		},
 	}
 
 	// Additional safety check before calling ServeHTTP
@@ -304,6 +380,20 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 func (s *Handler) returnEmptyResponse(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Data-Source", "ban-protection")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Proxy-Empty", "1")
+
+	// Set backoff headers if we have a recovery time
+	if bd := service.GetBanDetector(); bd != nil {
+		if banned, until := bd.GetBanStatus(s.class); banned {
+			secs := int(time.Until(until).Seconds())
+			if secs < 1 {
+				secs = 30
+			}
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
+			w.Header().Set("X-Backoff-Until", until.Format(time.RFC3339))
+		}
+	}
 
 	var response []byte
 	switch r.URL.Path {
@@ -317,81 +407,9 @@ func (s *Handler) returnEmptyResponse(w http.ResponseWriter, r *http.Request) {
 		response = []byte("{}") // Generic empty response
 	}
 
+	// Return 429 to signal clients to slow down/back off
+	w.WriteHeader(http.StatusTooManyRequests)
 	w.Write(response)
-}
-
-type banCheckTransport struct {
-	Transport http.RoundTripper
-	class     service.Class
-	handler   *Handler
-	w         http.ResponseWriter
-	r         *http.Request
-	// Remove endpoint field until load balancer is implemented
-}
-
-func (t *banCheckTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Validate essential fields
-	if t == nil {
-		logcache.LogOncePerDuration("error", "banCheckTransport is nil")
-		return nil, fmt.Errorf("transport is nil")
-	}
-	if t.handler == nil {
-		logcache.LogOncePerDuration("error", "Handler is nil in banCheckTransport")
-		return nil, fmt.Errorf("handler is nil")
-	}
-	if req == nil {
-		logcache.LogOncePerDuration("error", "Request is nil in banCheckTransport")
-		return nil, fmt.Errorf("request is nil")
-	}
-	if t.Transport == nil {
-		logcache.LogOncePerDuration("error", "Transport is nil in banCheckTransport, using default transport")
-		t.Transport = http.DefaultTransport
-	}
-
-	log.Debugf("Making round trip for %s %s", req.Method, req.URL.String())
-
-	resp, err := t.Transport.RoundTrip(req)
-
-	if err != nil {
-		log.Debugf("Round trip error: %v", err)
-	} else if resp != nil {
-		log.Debugf("Round trip response status: %d", resp.StatusCode)
-	}
-
-	// Check for bans
-	banDetector := service.GetBanDetector()
-	if banDetector != nil && banDetector.CheckResponse(t.class, resp, err) {
-		logcache.LogOncePerDuration("warn", "API ban detected, returning synthetic empty response")
-		if resp != nil {
-			resp.Body.Close()
-		}
-		// Build a synthetic empty response so ReverseProxy can forward it cleanly
-		var body []byte
-		switch req.URL.Path {
-		case "/api/v3/klines", "/fapi/v1/klines":
-			body = []byte("[]")
-		case "/api/v3/depth", "/fapi/v1/depth":
-			body = []byte(`{"lastUpdateId":0,"bids":[],"asks":[]}`)
-		case "/api/v3/ticker/24hr":
-			body = []byte("{}")
-		default:
-			body = []byte("{}")
-		}
-		hdr := make(http.Header)
-		hdr.Set("Content-Type", "application/json")
-		hdr.Set("Data-Source", "ban-protection")
-		synth := &http.Response{
-			Status:        "200 OK",
-			StatusCode:    http.StatusOK,
-			Header:        hdr,
-			Body:          io.NopCloser(bytes.NewReader(body)),
-			ContentLength: int64(len(body)),
-			Request:       req,
-		}
-		return synth, nil
-	}
-
-	return resp, err
 }
 
 func (s *Handler) status(w http.ResponseWriter) {

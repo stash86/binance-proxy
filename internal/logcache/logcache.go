@@ -17,6 +17,10 @@ var (
 	numberRegexp    = regexp.MustCompile(`[0-9]+(\.[0-9]+)?`)
 	timestampRegexp = regexp.MustCompile(`\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?`)
 	quotedRegexp    = regexp.MustCompile(`"[^"]*"`)
+
+	// Optional hooks for unified logging backends
+	loggerHook func(level, msg string)
+	writerHook func(msg string)
 )
 
 func Normalize(msg string) string {
@@ -36,7 +40,11 @@ func LogOncePerDuration(level, msg string) {
 		return
 	}
 	cache[key] = time.Now()
-	// Use standard log for demonstration; replace with logrus or other as needed
+	if loggerHook != nil {
+		loggerHook(level, msg)
+		return
+	}
+	// Default to standard logger if no hook set
 	switch level {
 	case "warn":
 		log.Printf("WARN: %s", msg)
@@ -72,5 +80,25 @@ func (w *suppressingWriter) Write(p []byte) (int, error) {
 	}
 	cache[key] = time.Now()
 	cacheLock.Unlock()
-	return w.next.Write(p)
+	if writerHook != nil {
+		writerHook(msg)
+		return len(p), nil
+	}
+	if w.next != nil {
+		return w.next.Write(p)
+	}
+	// Nothing to write to but not an error; pretend success
+	return len(p), nil
+}
+
+// SetLoggerHook sets a custom hook to handle LogOncePerDuration output.
+// The hook receives a level (e.g., "info", "warn", "error") and the message.
+func SetLoggerHook(hook func(level, msg string)) {
+	loggerHook = hook
+}
+
+// SetWriterHook sets a custom hook to handle writes from the suppressing writer.
+// Useful to route net/http Server.ErrorLog output into a different logging backend.
+func SetWriterHook(hook func(msg string)) {
+	writerHook = hook
 }

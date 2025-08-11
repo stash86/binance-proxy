@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	_ "net/http/pprof"
 
@@ -25,8 +26,12 @@ func startProxy(ctx context.Context, port int, class service.Class, disablefakek
 
 	// Create an HTTP server with a custom ErrorLog that suppresses repeated lines
 	srv := &http.Server{
-		Addr:    address,
-		Handler: mux,
+		Addr:              address,
+		Handler:           mux,
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      75 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		ErrorLog: stdlog.New(
 			logcache.NewSuppressingWriter(os.Stderr),
 			"", stdlog.LstdFlags,
@@ -64,7 +69,7 @@ var (
 	config      Config
 	parser             = flags.NewParser(&config, flags.Default)
 	Version     string = "1.0.4"
-	Buildtime   string = "2025-07-15"
+	Buildtime   string = "2025-08-11"
 	ctx, cancel        = context.WithCancel(context.Background())
 )
 
@@ -72,6 +77,27 @@ func main() {
 	log.SetFormatter(&log.TextFormatter{
 		DisableColors: true,
 		FullTimestamp: true,
+	})
+
+	// Route logcache output through logrus for consistent formatting/levels
+	logcache.SetLoggerHook(func(level, msg string) {
+		switch level {
+		case "warn":
+			log.Warn(msg)
+		case "error":
+			log.Error(msg)
+		case "info":
+			log.Info(msg)
+		default:
+			log.Print(msg)
+		}
+	})
+	logcache.SetWriterHook(func(msg string) {
+		// net/http ErrorLog messages typically include trailing newlines
+		if len(msg) > 0 && msg[len(msg)-1] == '\n' {
+			msg = msg[:len(msg)-1]
+		}
+		log.Warnf("http: %s", msg)
 	})
 
 	log.Infof("Binance proxy version %s, build time %s", Version, Buildtime)
