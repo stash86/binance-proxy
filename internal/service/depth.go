@@ -3,6 +3,7 @@ package service
 import (
 	"binance-proxy/internal/tool"
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,12 @@ import (
 
 	spot "github.com/adshao/go-binance/v2"
 	futures "github.com/adshao/go-binance/v2/futures"
+)
+
+const (
+	depthLevels         = 20
+	depthUpdateInterval = 100 * time.Millisecond
+	depthInitTimeout    = 2 * time.Second
 )
 
 type DepthSrv struct {
@@ -44,14 +51,21 @@ func NewDepthSrv(ctx context.Context, si *symbolInterval) *DepthSrv {
 
 func (s *DepthSrv) Start() {
 	go func() {
-		for d := tool.NewDelayIterator(); ; d.Delay() {
-			s.rw.Lock()
-			s.depth = nil
-			s.rw.Unlock()
+		for d := tool.NewDelayIterator(); ; {
+			select {
+			case <-s.ctx.Done():
+				return
+			default:
+			}
+
+			s.clearDepth()
 
 			doneC, stopC, err := s.connect()
 			if err != nil {
 				log.Errorf("%s %s depth websocket connection error: %s.", s.si.Class, s.si.Symbol, err)
+				if !d.DelayContext(s.ctx) {
+					return
+				}
 				continue
 			}
 
@@ -60,12 +74,15 @@ func (s *DepthSrv) Start() {
 			d.Reset()
 			select {
 			case <-s.ctx.Done():
-				stopC <- struct{}{}
+				s.stopWebsocket(stopC)
 				return
 			case <-doneC:
 			}
 
 			log.Warnf("%s %s depth websocket disconnected, trying to reconnect.", s.si.Class, s.si.Symbol)
+			if !d.DelayContext(s.ctx) {
+				return
+			}
 		}
 	}()
 }
@@ -76,21 +93,47 @@ func (s *DepthSrv) Stop() {
 
 func (s *DepthSrv) connect() (doneC, stopC chan struct{}, err error) {
 	if s.si.Class == SPOT {
-		return spot.WsPartialDepthServe100Ms(s.si.Symbol, "20", s.wsHandler, s.errHandler)
-	} else {
-		return futures.WsPartialDepthServeWithRate(s.si.Symbol, 20, 100*time.Millisecond, s.wsHandlerFutures, s.errHandler)
+		return spot.WsPartialDepthServe100Ms(s.si.Symbol, strconv.Itoa(depthLevels), s.wsHandler, s.errHandler)
 	}
+	return futures.WsPartialDepthServeWithRate(s.si.Symbol, depthLevels, depthUpdateInterval, s.wsHandlerFutures, s.errHandler)
 }
 
 func (s *DepthSrv) GetDepth() *Depth {
-	<-s.initCtx.Done()
+	if !s.waitForInit() {
+		return nil
+	}
+
 	s.rw.RLock()
 	defer s.rw.RUnlock()
 
-	return s.depth
+	return cloneDepth(s.depth)
+}
+
+func (s *DepthSrv) waitForInit() bool {
+	select {
+	case <-s.initCtx.Done():
+		return true
+	default:
+	}
+
+	timer := time.NewTimer(depthInitTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-s.initCtx.Done():
+		return true
+	case <-s.ctx.Done():
+		return false
+	case <-timer.C:
+		return false
+	}
 }
 
 func (s *DepthSrv) wsHandlerFutures(event *futures.WsDepthEvent) {
+	if event == nil {
+		return
+	}
+
 	s.rw.Lock()
 	defer s.rw.Unlock()
 
@@ -109,6 +152,12 @@ func (s *DepthSrv) wsHandlerFutures(event *futures.WsDepthEvent) {
 }
 
 func (s *DepthSrv) wsHandler(event *spot.WsPartialDepthEvent) {
+	if event == nil {
+		return
+	}
+
+	now := time.Now().UnixMilli()
+
 	s.rw.Lock()
 	defer s.rw.Unlock()
 
@@ -118,8 +167,8 @@ func (s *DepthSrv) wsHandler(event *spot.WsPartialDepthEvent) {
 
 	s.depth = &Depth{
 		LastUpdateID: event.LastUpdateID,
-		Time:         time.Now().UnixNano() / 1e6,
-		TradeTime:    time.Now().UnixNano() / 1e6,
+		Time:         now,
+		TradeTime:    now,
 		Bids:         event.Bids,
 		Asks:         event.Asks,
 	}
@@ -128,7 +177,11 @@ func (s *DepthSrv) wsHandler(event *spot.WsPartialDepthEvent) {
 }
 
 func (s *DepthSrv) errHandler(err error) {
-	msg := err.Error()
+	if err == nil {
+		return
+	}
+
+	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "context canceled"):
 		log.Warnf("%s %s depth websocket context canceled, will restart connection.", s.si.Class, s.si.Symbol)
@@ -138,4 +191,34 @@ func (s *DepthSrv) errHandler(err error) {
 	default:
 		log.Errorf("%s %s depth websocket connection error: %s.", s.si.Class, s.si.Symbol, err)
 	}
+}
+
+func (s *DepthSrv) clearDepth() {
+	s.rw.Lock()
+	defer s.rw.Unlock()
+
+	s.depth = nil
+}
+
+func (s *DepthSrv) stopWebsocket(stopC chan struct{}) {
+	if stopC == nil {
+		return
+	}
+
+	select {
+	case stopC <- struct{}{}:
+	case <-time.After(time.Second):
+		log.Debugf("%s %s depth websocket stop signal timed out.", s.si.Class, s.si.Symbol)
+	}
+}
+
+func cloneDepth(depth *Depth) *Depth {
+	if depth == nil {
+		return nil
+	}
+
+	cloned := *depth
+	cloned.Bids = append([]futures.Bid(nil), depth.Bids...)
+	cloned.Asks = append([]futures.Ask(nil), depth.Asks...)
+	return &cloned
 }

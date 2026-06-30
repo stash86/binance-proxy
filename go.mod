@@ -1,14 +1,14 @@
 module binance-proxy
 
-go 1.23.0
+go 1.26
 
-toolchain go1.24.4
+toolchain go1.26.4
 
 require (
-	github.com/adshao/go-binance/v2 v2.8.2
+	github.com/adshao/go-binance/v2 v2.8.12
 	github.com/jessevdk/go-flags v1.6.1
-	github.com/sirupsen/logrus v1.9.3
-	golang.org/x/time v0.12.0
+	github.com/sirupsen/logrus v1.9.4
+	golang.org/x/time v0.15.0
 )
 
 require (
@@ -17,5 +17,5 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jpillora/backoff v1.0.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 )

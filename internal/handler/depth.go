@@ -1,21 +1,31 @@
 package handler
 
 import (
+	"binance-proxy/internal/service"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 )
 
+const (
+	defaultDepthLimit = 20
+	minDepthLimit     = 5
+	maxDepthLimit     = 20
+)
+
+type depthResponse struct {
+	LastUpdateID int64       `json:"lastUpdateId"`
+	Time         int64       `json:"E"`
+	TradeTime    int64       `json:"T"`
+	Bids         [][2]string `json:"bids"`
+	Asks         [][2]string `json:"asks"`
+}
+
 func (s *Handler) depth(w http.ResponseWriter, r *http.Request) {
 	symbol := r.URL.Query().Get("symbol")
-	limit := r.URL.Query().Get("limit")
-	if limit == "" {
-		limit = "20"
-	}
-
-	limitInt, err := strconv.Atoi(limit)
-	switch {
-	case err != nil, symbol == "", limitInt < 5, limitInt > 20:
+	limit, ok := parseDepthLimit(r.URL.Query())
+	if !ok || symbol == "" {
 		s.reverseProxy(w, r)
 		return
 	}
@@ -24,31 +34,6 @@ func (s *Handler) depth(w http.ResponseWriter, r *http.Request) {
 	if depth == nil {
 		s.reverseProxy(w, r)
 		return
-	}
-
-	bidsLen := len(depth.Bids)
-	asksLen := len(depth.Asks)
-	minLen := bidsLen
-	if asksLen < minLen {
-		minLen = asksLen
-	}
-	if minLen > limitInt {
-		minLen = limitInt
-	}
-
-	// Pre-allocate with exact capacity
-	bids := make([][2]string, minLen)
-	asks := make([][2]string, minLen)
-
-	for i := 0; i < minLen; i++ {
-		asks[i] = [2]string{
-			depth.Asks[i].Price,
-			depth.Asks[i].Quantity,
-		}
-		bids[i] = [2]string{
-			depth.Bids[i].Price,
-			depth.Bids[i].Quantity,
-		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -61,18 +46,61 @@ func (s *Handler) depth(w http.ResponseWriter, r *http.Request) {
 	encoder := json.NewEncoder(buf)
 	encoder.SetEscapeHTML(false)
 
-	response := map[string]interface{}{
-		"lastUpdateId": depth.LastUpdateID,
-		"E":            depth.Time,
-		"T":            depth.TradeTime,
-		"bids":         bids,
-		"asks":         asks,
-	}
-
-	if err := encoder.Encode(response); err != nil {
+	if err := encoder.Encode(buildDepthResponse(depth, limit)); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
 
 	w.Write(buf.Bytes())
+}
+
+func parseDepthLimit(query url.Values) (int, bool) {
+	limit := query.Get("limit")
+	if limit == "" {
+		return defaultDepthLimit, true
+	}
+
+	limitInt, err := strconv.Atoi(limit)
+	if err != nil || limitInt < minDepthLimit || limitInt > maxDepthLimit {
+		return 0, false
+	}
+
+	return limitInt, true
+}
+
+func buildDepthResponse(depth *service.Depth, limit int) depthResponse {
+	bidsLen := depthResponseLen(len(depth.Bids), limit)
+	asksLen := depthResponseLen(len(depth.Asks), limit)
+
+	bids := make([][2]string, bidsLen)
+	for i := 0; i < bidsLen; i++ {
+		bids[i] = [2]string{
+			depth.Bids[i].Price,
+			depth.Bids[i].Quantity,
+		}
+	}
+
+	asks := make([][2]string, asksLen)
+	for i := 0; i < asksLen; i++ {
+		asks[i] = [2]string{
+			depth.Asks[i].Price,
+			depth.Asks[i].Quantity,
+		}
+	}
+
+	return depthResponse{
+		LastUpdateID: depth.LastUpdateID,
+		Time:         depth.Time,
+		TradeTime:    depth.TradeTime,
+		Bids:         bids,
+		Asks:         asks,
+	}
+}
+
+func depthResponseLen(available, limit int) int {
+	if available < limit {
+		return available
+	}
+
+	return limit
 }

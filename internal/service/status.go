@@ -5,6 +5,12 @@ import (
 	"time"
 )
 
+const (
+	statusServiceName          = "binance-proxy"
+	statusUnhealthyMinRequests = 100
+	statusUnhealthyErrorRate   = 0.10
+)
+
 // StatusTracker tracks the overall status of the proxy service
 type StatusTracker struct {
 	mu          sync.RWMutex
@@ -24,12 +30,16 @@ var (
 // GetStatusTracker returns the global status tracker instance
 func GetStatusTracker() *StatusTracker {
 	statusTrackerOnce.Do(func() {
-		statusTracker = &StatusTracker{
-			startTime: time.Now(),
-			isHealthy: true,
-		}
+		statusTracker = newStatusTracker(time.Now())
 	})
 	return statusTracker
+}
+
+func newStatusTracker(startTime time.Time) *StatusTracker {
+	return &StatusTracker{
+		startTime: startTime,
+		isHealthy: true,
+	}
 }
 
 // Status represents the current status of the proxy
@@ -54,11 +64,11 @@ func (st *StatusTracker) GetStatus() Status {
 	uptime := time.Since(st.startTime)
 	errorRate := float64(0)
 	if st.requests > 0 {
-		errorRate = float64(st.errors) / float64(st.requests) * 100
+		errorRate = st.errorRateLocked() * 100
 	}
 
 	status := Status{
-		Service:   "binance-proxy",
+		Service:   statusServiceName,
 		Healthy:   st.isHealthy,
 		StartTime: st.startTime,
 		Uptime:    uptime.String(),
@@ -85,6 +95,10 @@ func (st *StatusTracker) RecordRequest() {
 
 // RecordError increments the error counter and records the error
 func (st *StatusTracker) RecordError(err error) {
+	if err == nil {
+		return
+	}
+
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.errors++
@@ -92,7 +106,7 @@ func (st *StatusTracker) RecordError(err error) {
 	st.lastErrorAt = time.Now()
 
 	// Consider service unhealthy if error rate is too high
-	if st.requests > 100 && float64(st.errors)/float64(st.requests) > 0.1 {
+	if st.requests > statusUnhealthyMinRequests && st.errorRateLocked() > statusUnhealthyErrorRate {
 		st.isHealthy = false
 	}
 }
@@ -114,4 +128,11 @@ func (st *StatusTracker) Reset() {
 	st.lastErrorAt = time.Time{}
 	st.requests = 0
 	st.errors = 0
+}
+
+func (st *StatusTracker) errorRateLocked() float64 {
+	if st.requests == 0 {
+		return 0
+	}
+	return float64(st.errors) / float64(st.requests)
 }

@@ -5,10 +5,16 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 
 	spot "github.com/adshao/go-binance/v2"
+)
+
+const (
+	tickerInitTimeout = 2 * time.Second
+	tickerStopTimeout = time.Second
 )
 
 type TickerSrv struct {
@@ -65,38 +71,51 @@ func NewTickerSrv(ctx context.Context, si *symbolInterval) *TickerSrv {
 
 func (s *TickerSrv) Start() {
 	go func() {
-		for d := tool.NewDelayIterator(); ; d.Delay() {
-			s.rw.Lock()
-			s.ticker24hr = nil
-			s.bookTicker = nil
-			s.rw.Unlock()
+		for d := tool.NewDelayIterator(); ; {
+			select {
+			case <-s.ctx.Done():
+				return
+			default:
+			}
+
+			s.clearTickers()
 
 			ticker24hrDoneC, ticker24hrstopC, err := s.connectTicker24hr()
 			if err != nil {
 				log.Errorf("%s %s ticker24hr websocket connection error: %s.", s.si.Class, s.si.Symbol, err)
+				if !d.DelayContext(s.ctx) {
+					return
+				}
 				continue
 			}
 
 			bookDoneC, bookStopC, err := s.connectTickerBook()
 			if err != nil {
-				bookStopC <- struct{}{}
+				s.stopWebsocket(ticker24hrstopC)
 				log.Errorf("%s %s bookTicker websocket connection error: %s.", s.si.Class, s.si.Symbol, err)
+				if !d.DelayContext(s.ctx) {
+					return
+				}
 				continue
 			}
 
 			log.Debugf("%s %s ticker24hr and bookTicker websocket connected.", s.si.Class, s.si.Symbol)
+			d.Reset()
 			select {
 			case <-s.ctx.Done():
-				bookStopC <- struct{}{}
-				ticker24hrstopC <- struct{}{}
+				s.stopWebsocket(bookStopC)
+				s.stopWebsocket(ticker24hrstopC)
 				return
 			case <-bookDoneC:
-				ticker24hrstopC <- struct{}{}
+				s.stopWebsocket(ticker24hrstopC)
 			case <-ticker24hrDoneC:
-				bookStopC <- struct{}{}
+				s.stopWebsocket(bookStopC)
 			}
 
 			log.Warnf("%s %s ticker24hr or bookTicker websocket disconnected, trying to reconnect.", s.si.Class, s.si.Symbol)
+			if !d.DelayContext(s.ctx) {
+				return
+			}
 		}
 	}()
 }
@@ -114,9 +133,16 @@ func (s *TickerSrv) connectTicker24hr() (doneC, stopC chan struct{}, err error) 
 }
 
 func (s *TickerSrv) GetTicker() *Ticker24hr {
-	<-s.initCtx.Done()
+	if !s.waitForInit() {
+		return nil
+	}
+
 	s.rw.RLock()
 	defer s.rw.RUnlock()
+
+	if s.ticker24hr == nil {
+		return nil
+	}
 
 	bidPrice := s.ticker24hr.BidPrice
 	askPrice := s.ticker24hr.AskPrice
@@ -131,7 +157,7 @@ func (s *TickerSrv) GetTicker() *Ticker24hr {
 		PriceChangePercent: s.ticker24hr.PriceChangePercent,
 		WeightedAvgPrice:   s.ticker24hr.WeightedAvgPrice,
 		PrevClosePrice:     s.ticker24hr.PrevClosePrice,
-		LastPrice:          askPrice,
+		LastPrice:          s.ticker24hr.LastPrice,
 		LastQty:            s.ticker24hr.LastQty,
 		BidPrice:           bidPrice,
 		AskPrice:           askPrice,
@@ -149,6 +175,10 @@ func (s *TickerSrv) GetTicker() *Ticker24hr {
 }
 
 func (s *TickerSrv) wsHandlerBookTicker(event *spot.WsBookTickerEvent) {
+	if event == nil {
+		return
+	}
+
 	s.rw.Lock()
 	defer s.rw.Unlock()
 
@@ -163,6 +193,10 @@ func (s *TickerSrv) wsHandlerBookTicker(event *spot.WsBookTickerEvent) {
 }
 
 func (s *TickerSrv) wsHandlerTicker24hr(event *spot.WsMarketStatEvent) {
+	if event == nil {
+		return
+	}
+
 	s.rw.Lock()
 	defer s.rw.Unlock()
 
@@ -195,9 +229,57 @@ func (s *TickerSrv) wsHandlerTicker24hr(event *spot.WsMarketStatEvent) {
 }
 
 func (s *TickerSrv) errHandler(err error) {
-	if strings.Contains(err.Error(), "context canceled") {
+	if err == nil {
+		return
+	}
+
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "context canceled"):
 		log.Warnf("%s %s ticker websocket context canceled, will restart connection.", s.si.Class, s.si.Symbol)
-	} else {
+	case strings.Contains(msg, "use of closed network connection"):
+		log.Infof("%s %s ticker websocket closed by peer; reconnecting.", s.si.Class, s.si.Symbol)
+	default:
 		log.Errorf("%s %s ticker24hr websocket connection error: %s.", s.si.Class, s.si.Symbol, err)
+	}
+}
+
+func (s *TickerSrv) waitForInit() bool {
+	select {
+	case <-s.initCtx.Done():
+		return true
+	default:
+	}
+
+	timer := time.NewTimer(tickerInitTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-s.initCtx.Done():
+		return true
+	case <-s.ctx.Done():
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
+func (s *TickerSrv) clearTickers() {
+	s.rw.Lock()
+	defer s.rw.Unlock()
+
+	s.ticker24hr = nil
+	s.bookTicker = nil
+}
+
+func (s *TickerSrv) stopWebsocket(stopC chan struct{}) {
+	if stopC == nil {
+		return
+	}
+
+	select {
+	case stopC <- struct{}{}:
+	case <-time.After(tickerStopTimeout):
+		log.Debugf("%s %s ticker websocket stop signal timed out.", s.si.Class, s.si.Symbol)
 	}
 }

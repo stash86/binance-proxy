@@ -1,5 +1,5 @@
 # build stage
-FROM golang:1.24 AS builder
+FROM golang:1.26.4 AS builder
 WORKDIR /app
 COPY . .
 RUN go mod download

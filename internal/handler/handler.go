@@ -88,7 +88,7 @@ func (s *Handler) Router(w http.ResponseWriter, r *http.Request) {
 		s.ticker(w, r)
 
 	case "/api/v3/exchangeInfo", "/fapi/v1/exchangeInfo":
-		s.exchangeInfo(w)
+		s.exchangeInfo(w, r)
 
 	default:
 		s.reverseProxy(w, r)
@@ -103,9 +103,13 @@ var (
 	proxyHTTPClient     *http.Client
 )
 
+const (
+	spotProxyBaseURL    = "https://api.binance.com"
+	futuresProxyBaseURL = "https://fapi.binance.com"
+)
+
 func getProxyHTTPClient() *http.Client {
 	proxyHTTPClientOnce.Do(func() {
-		// Create a new transport each time to avoid concurrent modification issues
 		transport := &http.Transport{
 			MaxIdleConns:        200,
 			MaxIdleConnsPerHost: 20,
@@ -143,21 +147,66 @@ func getProxyHTTPClient() *http.Client {
 		}
 	}
 
-	// Double-check transport is not nil and clone it to avoid concurrent modification
+	// Double-check transport is not nil before sharing the pooled client.
 	if proxyHTTPClient.Transport == nil {
 		log.Errorf("HTTP client transport is nil, fixing with default transport")
 		proxyHTTPClient.Transport = http.DefaultTransport
 	}
 
-	// Return a copy of the client with a cloned transport to avoid concurrent modifications
-	transport := proxyHTTPClient.Transport
-	if ht, ok := transport.(*http.Transport); ok {
-		transport = ht.Clone()
+	return proxyHTTPClient
+}
+
+func proxyTargetURL(class service.Class) (*url.URL, error) {
+	if class == service.SPOT {
+		return url.Parse(spotProxyBaseURL)
 	}
 
-	return &http.Client{
-		Transport: transport,
-		Timeout:   proxyHTTPClient.Timeout,
+	return url.Parse(futuresProxyBaseURL)
+}
+
+func requestPath(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+
+	return r.URL.Path
+}
+
+func responsePath(resp *http.Response) string {
+	if resp == nil || resp.Request == nil {
+		return ""
+	}
+
+	return requestPath(resp.Request)
+}
+
+func syntheticEmptyResponseBody(path string) []byte {
+	switch path {
+	case "/api/v3/klines", "/fapi/v1/klines":
+		return []byte("[]")
+	case "/api/v3/depth", "/fapi/v1/depth":
+		return []byte(`{"lastUpdateId":0,"bids":[],"asks":[]}`)
+	case "/api/v3/ticker/24hr":
+		return []byte("{}")
+	default:
+		return []byte("{}")
+	}
+}
+
+func setBackoffHeaders(header http.Header, class service.Class) {
+	if header == nil {
+		return
+	}
+
+	if bd := service.GetBanDetector(); bd != nil {
+		if banned, until := bd.GetBanStatus(class); banned {
+			secs := int(time.Until(until).Seconds())
+			if secs < 1 {
+				secs = 30
+			}
+			header.Set("Retry-After", fmt.Sprintf("%d", secs))
+			header.Set("X-Backoff-Until", until.Format(time.RFC3339))
+		}
 	}
 }
 
@@ -211,19 +260,13 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 		log.Trace(msg)
 	}
 
-	service.RateWait(s.ctx, s.class, r.Method, r.URL.Path, r.URL.Query())
-
-	// Use hardcoded endpoints (current working version)
-	var u *url.URL
-	var err error
-	if s.class == service.SPOT {
-		r.Host = "api.binance.com"
-		u, err = url.Parse("https://api.binance.com")
-	} else {
-		r.Host = "fapi.binance.com"
-		u, err = url.Parse("https://fapi.binance.com")
+	if err := service.RateWait(s.ctx, s.class, r.Method, r.URL.Path, r.URL.Query()); err != nil {
+		logcache.LogOncePerDuration("warn", fmt.Sprintf("%s rate wait failed: %v", s.class, err))
+		http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
+		return
 	}
 
+	u, err := proxyTargetURL(s.class)
 	if err != nil || u == nil {
 		logcache.LogOncePerDuration("error", fmt.Sprintf("Failed to parse URL for %s: %v", s.class, err))
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -292,17 +335,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 				if resp.Body != nil {
 					resp.Body.Close()
 				}
-				var body []byte
-				switch resp.Request.URL.Path {
-				case "/api/v3/klines", "/fapi/v1/klines":
-					body = []byte("[]")
-				case "/api/v3/depth", "/fapi/v1/depth":
-					body = []byte(`{"lastUpdateId":0,"bids":[],"asks":[]}`)
-				case "/api/v3/ticker/24hr":
-					body = []byte("{}")
-				default:
-					body = []byte("{}")
-				}
+				body := syntheticEmptyResponseBody(responsePath(resp))
 				resp.Header.Set("Content-Type", "application/json")
 				resp.Header.Set("Data-Source", "ban-protection")
 				resp.Header.Set("Cache-Control", "no-store")
@@ -311,14 +344,7 @@ func (s *Handler) reverseProxy(w http.ResponseWriter, r *http.Request) {
 				resp.StatusCode = http.StatusTooManyRequests
 				resp.Status = "429 Too Many Requests"
 				// Populate Retry-After based on ban detector recovery time if available
-				if banned, until := bd.GetBanStatus(s.class); banned {
-					secs := int(time.Until(until).Seconds())
-					if secs < 1 {
-						secs = 30
-					}
-					resp.Header.Set("Retry-After", fmt.Sprintf("%d", secs))
-					resp.Header.Set("X-Backoff-Until", until.Format(time.RFC3339))
-				}
+				setBackoffHeaders(resp.Header, s.class)
 				resp.Header.Set("X-Proxy-Empty", "1")
 				resp.Body = io.NopCloser(bytes.NewReader(body))
 				resp.ContentLength = int64(len(body))
@@ -383,33 +409,13 @@ func (s *Handler) returnEmptyResponse(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Proxy-Empty", "1")
 
-	// Set backoff headers if we have a recovery time
-	if bd := service.GetBanDetector(); bd != nil {
-		if banned, until := bd.GetBanStatus(s.class); banned {
-			secs := int(time.Until(until).Seconds())
-			if secs < 1 {
-				secs = 30
-			}
-			w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
-			w.Header().Set("X-Backoff-Until", until.Format(time.RFC3339))
-		}
-	}
-
-	var response []byte
-	switch r.URL.Path {
-	case "/api/v3/klines", "/fapi/v1/klines":
-		response = []byte("[]") // Empty klines array
-	case "/api/v3/depth", "/fapi/v1/depth":
-		response = []byte(`{"lastUpdateId":0,"bids":[],"asks":[]}`)
-	case "/api/v3/ticker/24hr":
-		response = []byte("{}") // Empty ticker object
-	default:
-		response = []byte("{}") // Generic empty response
-	}
+	setBackoffHeaders(w.Header(), s.class)
 
 	// Return 429 to signal clients to slow down/back off
 	w.WriteHeader(http.StatusTooManyRequests)
-	w.Write(response)
+	if _, err := w.Write(syntheticEmptyResponseBody(requestPath(r))); err != nil {
+		log.Errorf("%s empty response write failed: %v", s.class, err)
+	}
 }
 
 func (s *Handler) status(w http.ResponseWriter) {
@@ -425,9 +431,7 @@ func (s *Handler) status(w http.ResponseWriter) {
 		// Context is still valid, proceed normally
 	}
 
-	// Record the request
 	statusTracker := service.GetStatusTracker()
-	statusTracker.RecordRequest()
 
 	// Get current status
 	status := statusTracker.GetStatus()
@@ -494,6 +498,9 @@ func (s *Handler) restart(w http.ResponseWriter, r *http.Request) {
 
 		// Cancel the context to trigger graceful shutdown
 		s.cancel()
+		if s.srv != nil {
+			s.srv.Stop()
+		}
 
 		// Give some time for graceful shutdown, then force exit
 		time.Sleep(3 * time.Second)

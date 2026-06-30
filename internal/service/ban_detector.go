@@ -17,12 +17,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// Buffer pool for reusing byte buffers to reduce GC pressure
-var bufferPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 0, 1024) // Start with 1KB capacity
-	},
-}
+const (
+	defaultSpotWeightLimit    = 1200
+	defaultFuturesWeightLimit = 2400
+	weightLimitThreshold      = 0.9
+)
+
+var banExpiryRegexp = regexp.MustCompile(`\b(\d{10,13})\b`)
 
 type BanDetector struct {
 	mu sync.RWMutex
@@ -64,56 +65,60 @@ func (bd *BanDetector) IsBanned(class Class) bool {
 	bd.mu.Lock()
 	defer bd.mu.Unlock()
 
-	now := time.Now()
+	return bd.isBannedLocked(class, time.Now())
+}
 
+func (bd *BanDetector) isBannedLocked(class Class, now time.Time) bool {
 	if class == SPOT {
-		if bd.spotBanned && now.Before(bd.spotRecoveryTime) {
-			return true
-		} else if bd.spotBanned && now.After(bd.spotRecoveryTime) {
-			// Recovery time passed, clear ban
-			bd.spotBanned = false
-			log.Infof("%s API ban lifted, resuming normal operation", class)
+		if !bd.spotBanned {
+			return false
 		}
-	} else {
-		if bd.futuresBanned && now.Before(bd.futuresRecoveryTime) {
+		if now.Before(bd.spotRecoveryTime) {
 			return true
-		} else if bd.futuresBanned && now.After(bd.futuresRecoveryTime) {
-			// Recovery time passed, clear ban
-			bd.futuresBanned = false
-			log.Infof("%s API ban lifted, resuming normal operation", class)
 		}
+		bd.spotBanned = false
+		log.Infof("%s API ban lifted, resuming normal operation", class)
+		return false
 	}
 
+	if !bd.futuresBanned {
+		return false
+	}
+	if now.Before(bd.futuresRecoveryTime) {
+		return true
+	}
+	bd.futuresBanned = false
+	log.Infof("%s API ban lifted, resuming normal operation", class)
 	return false
 }
 
 func (bd *BanDetector) CheckResponse(class Class, resp *http.Response, err error) bool {
+	now := time.Now()
+
+	statusCode := 0
+	retryAfterUntil := time.Time{}
+	bodyBanUntil := time.Time{}
+	if resp != nil {
+		statusCode = resp.StatusCode
+		retryAfterUntil = bd.parseRetryAfter(resp, now)
+		if statusCode == http.StatusTeapot && retryAfterUntil.IsZero() {
+			bodyBanUntil = bd.parseBanExpiryNonDestructive(resp)
+		}
+	}
+
 	bd.mu.Lock()
 	defer bd.mu.Unlock()
 
-	now := time.Now()
-
 	// Check API weight headers if response is available
 	if resp != nil {
-		bd.updateWeightInfo(class, resp)
+		bd.updateWeightInfo(class, resp, now)
 
-		// Check if approaching weight limits
-		if bd.isApproachingWeightLimit(class) {
-			waitTime := bd.getWeightResetTime()
-			if waitTime > 0 {
-				bd.setBanned(class, now.Add(waitTime))
-				logcache.LogOncePerDuration("warn", fmt.Sprintf("%s API weight limit approaching, suspending requests until %v", class, bd.getRecoveryTime(class)))
-				return true
-			}
-		}
-
-		// Check for explicit ban status codes
-		switch resp.StatusCode {
-		case 418: // IP banned
-			banUntil := bd.parseRetryAfter(resp, now)
+		// Check for explicit ban status codes before local weight throttling.
+		switch statusCode {
+		case http.StatusTeapot: // Binance uses 418 for IP bans.
+			banUntil := retryAfterUntil
 			if banUntil.IsZero() {
-				// Fallback to parsing response body for timestamp
-				banUntil = bd.parseBanExpiryNonDestructive(resp)
+				banUntil = bodyBanUntil
 			}
 			if banUntil.IsZero() {
 				// If both methods fail, use 10 minutes default
@@ -125,8 +130,8 @@ func (bd *BanDetector) CheckResponse(class Class, resp *http.Response, err error
 			bd.setBanned(class, banUntil)
 			bd.resetBackoffCount(class) // Reset backoff on explicit ban
 			return true
-		case 429: // Rate limit exceeded
-			banUntil := bd.parseRetryAfter(resp, now)
+		case http.StatusTooManyRequests:
+			banUntil := retryAfterUntil
 			if banUntil.IsZero() {
 				// Fallback to 1 minute default
 				banUntil = now.Add(1 * time.Minute)
@@ -137,36 +142,40 @@ func (bd *BanDetector) CheckResponse(class Class, resp *http.Response, err error
 			bd.setBanned(class, banUntil)
 			bd.resetBackoffCount(class) // Reset backoff on explicit rate limit
 			return true
-		case 403: // Forbidden
+		case http.StatusForbidden:
 			bd.setBanned(class, now.Add(5*time.Minute))
 			log.Warnf("%s API access forbidden (403), suspending requests until %v", class, bd.getRecoveryTime(class))
 			return true
 		}
-	}
 
-	// Check for connection errors that might indicate bans
-	if err != nil {
-		errorMsg := err.Error()
-		if strings.Contains(errorMsg, "connection refused") ||
-			strings.Contains(errorMsg, "timeout") ||
-			strings.Contains(errorMsg, "no route to host") {
-
-			bd.incrementErrorCount(class, now)
-
-			// If too many errors in short time, use exponential backoff
-			errorCount := bd.getErrorCount(class)
-			if errorCount >= 5 {
-				backoffDuration := bd.getExponentialBackoff(class)
-				bd.setBanned(class, now.Add(backoffDuration))
-				bd.resetErrorCount(class)
-				log.Warnf("%s API connection issues detected (%d errors), suspending requests for %v until %v", class, errorCount, backoffDuration, bd.getRecoveryTime(class))
+		// Check if approaching weight limits
+		if bd.isApproachingWeightLimit(class) {
+			waitTime := bd.getWeightResetDuration(class, now)
+			if waitTime > 0 {
+				bd.setBanned(class, now.Add(waitTime))
+				logcache.LogOncePerDuration("warn", fmt.Sprintf("%s API weight limit approaching, suspending requests until %v", class, bd.getRecoveryTime(class)))
 				return true
 			}
 		}
 	}
 
+	// Check for connection errors that might indicate bans
+	if isLikelyBanConnectionError(err) {
+		bd.incrementErrorCount(class, now)
+
+		// If too many errors in short time, use exponential backoff
+		errorCount := bd.getErrorCount(class)
+		if errorCount >= 5 {
+			backoffDuration := bd.getExponentialBackoff(class)
+			bd.setBanned(class, now.Add(backoffDuration))
+			bd.resetErrorCount(class)
+			log.Warnf("%s API connection issues detected (%d errors), suspending requests for %v until %v", class, errorCount, backoffDuration, bd.getRecoveryTime(class))
+			return true
+		}
+	}
+
 	// Reset error count and backoff on successful request
-	if resp != nil && resp.StatusCode == 200 {
+	if resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		bd.resetErrorCount(class)
 		bd.resetBackoffCount(class)
 	}
@@ -179,40 +188,35 @@ func (bd *BanDetector) parseBanExpiryNonDestructive(resp *http.Response) time.Ti
 		return time.Time{}
 	}
 
-	// Get buffer from pool
-	buf := bufferPool.Get().([]byte)
-	defer func() {
-		buf = buf[:0] // Reset length but keep capacity
-		bufferPool.Put(buf)
-	}()
-
 	// Read response body without consuming it
+	originalBody := resp.Body
 	body, err := io.ReadAll(resp.Body)
+	_ = originalBody.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
 	if err != nil {
 		return time.Time{}
 	}
 
-	// Restore the body for later use
-	resp.Body = io.NopCloser(bytes.NewBuffer(body))
-
-	// Parse JSON response for banned until timestamp
+	// Parse JSON response for banned until timestamp. Fall back to the raw body
+	// so minor upstream response shape changes do not hide the ban expiry.
+	msg := string(body)
 	var banResponse struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
+	if err := json.Unmarshal(body, &banResponse); err == nil && banResponse.Msg != "" {
+		msg = banResponse.Msg
+	}
 
-	if err := json.Unmarshal(body, &banResponse); err == nil {
-		// Look for unix timestamp in message (10 or 13 digits)
-		re := regexp.MustCompile(`(\d{10,13})`)
-		matches := re.FindStringSubmatch(banResponse.Msg)
-		if len(matches) > 1 {
-			if timestamp, err := strconv.ParseInt(matches[1], 10, 64); err == nil {
-				// Convert milliseconds to seconds if needed
-				if timestamp > 9999999999 {
-					timestamp = timestamp / 1000
-				}
-				return time.Unix(timestamp, 0)
+	// Look for unix timestamp in message (10 or 13 digits)
+	matches := banExpiryRegexp.FindStringSubmatch(msg)
+	if len(matches) > 1 {
+		if timestamp, err := strconv.ParseInt(matches[1], 10, 64); err == nil {
+			// Convert milliseconds to seconds if needed
+			if timestamp > 9999999999 {
+				timestamp = timestamp / 1000
 			}
+			return time.Unix(timestamp, 0)
 		}
 	}
 
@@ -228,57 +232,82 @@ func (bd *BanDetector) parseRetryAfter(resp *http.Response, now time.Time) time.
 	if retryAfter == "" {
 		return time.Time{}
 	}
+	retryAfter = strings.TrimSpace(retryAfter)
 
 	// Parse seconds to wait
 	if seconds, err := strconv.Atoi(retryAfter); err == nil {
+		if seconds < 0 {
+			return time.Time{}
+		}
 		return now.Add(time.Duration(seconds) * time.Second)
+	}
+
+	if retryAt, err := http.ParseTime(retryAfter); err == nil {
+		if retryAt.Before(now) {
+			return now
+		}
+		return retryAt
 	}
 
 	return time.Time{}
 }
 
-func (bd *BanDetector) updateWeightInfo(class Class, resp *http.Response) {
+func (bd *BanDetector) updateWeightInfo(class Class, resp *http.Response, now time.Time) {
+	headerWeight, hasHeaderWeight := parseWeightHeader(resp)
+	nextReset := now.Truncate(time.Minute).Add(time.Minute)
+
 	// Spot API headers
 	if class == SPOT {
-		if used := resp.Header.Get("X-MBX-USED-WEIGHT-1M"); used != "" {
-			if weight, err := strconv.Atoi(used); err == nil {
-				bd.spotWeightUsed = weight
-			}
-		} else {
-			// Fallback: estimate weight usage (most kline requests are weight 1)
-			bd.spotWeightUsed += 1
-		}
-
 		// Set default limit if not set
 		if bd.spotWeightLimit == 0 {
-			bd.spotWeightLimit = 1200 // Default spot weight limit per minute
+			bd.spotWeightLimit = defaultSpotWeightLimit
 		}
-	} else {
-		// Futures API headers
-		if used := resp.Header.Get("X-MBX-USED-WEIGHT-1M"); used != "" {
-			if weight, err := strconv.Atoi(used); err == nil {
-				bd.futuresWeightUsed = weight
+		if bd.spotWeightReset.IsZero() || !now.Before(bd.spotWeightReset) {
+			bd.spotWeightReset = nextReset
+			if !hasHeaderWeight {
+				bd.spotWeightUsed = 0
 			}
-		} else {
-			// Fallback: estimate weight usage
-			bd.futuresWeightUsed += 1
 		}
-
-		// Set default limit if not set
-		if bd.futuresWeightLimit == 0 {
-			bd.futuresWeightLimit = 2400 // Default futures weight limit per minute
+		if hasHeaderWeight {
+			bd.spotWeightUsed = headerWeight
+			return
 		}
+		// Fallback: estimate weight usage (most kline requests are weight 1)
+		bd.spotWeightUsed += 1
+		return
 	}
 
-	// Reset weight counters every minute
-	now := time.Now()
-	if class == SPOT && now.After(bd.spotWeightReset) {
-		bd.spotWeightUsed = 0
-		bd.spotWeightReset = now.Truncate(time.Minute).Add(time.Minute)
-	} else if class != SPOT && now.After(bd.futuresWeightReset) {
-		bd.futuresWeightUsed = 0
-		bd.futuresWeightReset = now.Truncate(time.Minute).Add(time.Minute)
+	// Futures API headers
+	if bd.futuresWeightLimit == 0 {
+		bd.futuresWeightLimit = defaultFuturesWeightLimit
 	}
+	if bd.futuresWeightReset.IsZero() || !now.Before(bd.futuresWeightReset) {
+		bd.futuresWeightReset = nextReset
+		if !hasHeaderWeight {
+			bd.futuresWeightUsed = 0
+		}
+	}
+	if hasHeaderWeight {
+		bd.futuresWeightUsed = headerWeight
+		return
+	}
+	// Fallback: estimate weight usage
+	bd.futuresWeightUsed += 1
+}
+
+func parseWeightHeader(resp *http.Response) (int, bool) {
+	if resp == nil {
+		return 0, false
+	}
+	used := resp.Header.Get("X-MBX-USED-WEIGHT-1M")
+	if used == "" {
+		return 0, false
+	}
+	weight, err := strconv.Atoi(used)
+	if err != nil {
+		return 0, false
+	}
+	return weight, true
 }
 
 func (bd *BanDetector) getExponentialBackoff(class Class) time.Duration {
@@ -359,35 +388,40 @@ func (bd *BanDetector) resetErrorCount(class Class) {
 }
 
 func (bd *BanDetector) GetBanStatus(class Class) (bool, time.Time) {
-	bd.mu.RLock()
-	defer bd.mu.RUnlock()
+	bd.mu.Lock()
+	defer bd.mu.Unlock()
 
+	banned := bd.isBannedLocked(class, time.Now())
 	if class == SPOT {
-		return bd.spotBanned, bd.spotRecoveryTime
+		return banned, bd.spotRecoveryTime
 	}
-	return bd.futuresBanned, bd.futuresRecoveryTime
+	return banned, bd.futuresRecoveryTime
 }
 
 func (bd *BanDetector) isApproachingWeightLimit(class Class) bool {
 	if class == SPOT {
 		if bd.spotWeightLimit > 0 {
 			usage := float64(bd.spotWeightUsed) / float64(bd.spotWeightLimit)
-			return usage > 0.9 // 90% threshold
+			return usage > weightLimitThreshold
 		}
 	} else {
 		if bd.futuresWeightLimit > 0 {
 			usage := float64(bd.futuresWeightUsed) / float64(bd.futuresWeightLimit)
-			return usage > 0.9 // 90% threshold
+			return usage > weightLimitThreshold
 		}
 	}
 	return false
 }
 
-func (bd *BanDetector) getWeightResetTime() time.Duration {
-	// Weight limits reset every minute, so wait until next minute
-	now := time.Now()
-	nextMinute := now.Truncate(time.Minute).Add(time.Minute)
-	return nextMinute.Sub(now)
+func (bd *BanDetector) getWeightResetDuration(class Class, now time.Time) time.Duration {
+	resetTime := bd.spotWeightReset
+	if class != SPOT {
+		resetTime = bd.futuresWeightReset
+	}
+	if resetTime.IsZero() || !now.Before(resetTime) {
+		resetTime = now.Truncate(time.Minute).Add(time.Minute)
+	}
+	return resetTime.Sub(now)
 }
 
 func (bd *BanDetector) GetWeightInfo(class Class) (used int, limit int, resetTime time.Time) {
@@ -398,4 +432,16 @@ func (bd *BanDetector) GetWeightInfo(class Class) (used int, limit int, resetTim
 		return bd.spotWeightUsed, bd.spotWeightLimit, bd.spotWeightReset
 	}
 	return bd.futuresWeightUsed, bd.futuresWeightLimit, bd.futuresWeightReset
+}
+
+func isLikelyBanConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errorMsg := strings.ToLower(err.Error())
+	return strings.Contains(errorMsg, "connection refused") ||
+		strings.Contains(errorMsg, "connection reset by peer") ||
+		strings.Contains(errorMsg, "deadline exceeded") ||
+		strings.Contains(errorMsg, "no route to host") ||
+		strings.Contains(errorMsg, "timeout")
 }

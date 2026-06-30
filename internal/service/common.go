@@ -2,7 +2,15 @@ package service
 
 import "time"
 
-var INTERVAL_2_DURATION = map[string]time.Duration{
+type Class string
+
+const (
+	SPOT    Class = "SPOT"
+	FUTURES Class = "FUTURES"
+)
+
+var intervalDurations = map[string]time.Duration{
+	"1s":  1 * time.Second,
 	"1m":  1 * time.Minute,
 	"3m":  3 * time.Minute,
 	"5m":  5 * time.Minute,
@@ -20,16 +28,17 @@ var INTERVAL_2_DURATION = map[string]time.Duration{
 	"1M":  31 * 24 * time.Hour,
 }
 
+func intervalDuration(interval string) (time.Duration, bool) {
+	duration, ok := intervalDurations[interval]
+	return duration, ok
+}
+
 type symbolInterval struct {
 	Class    Class
 	Symbol   string
 	Interval string
 }
-type Class string
 
-var SPOT Class = "SPOT"
-var FUTURES Class = "FUTURES"
-
-func NewSymbolInterval(class Class, symbol, interval string) *symbolInterval {
+func newSymbolInterval(class Class, symbol, interval string) *symbolInterval {
 	return &symbolInterval{Class: class, Symbol: symbol, Interval: interval}
 }

@@ -16,7 +16,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: "1.26.4"
 
       - name: Check out code
         uses: actions/checkout@v4
@@ -30,7 +30,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: "1.26.4"
 
       - name: Check out code
         uses: actions/checkout@v4
@@ -45,22 +45,22 @@ jobs:
           path: ./bin/binance-proxy
 
 ### Tests not yet integrated ...
-  # test:
-  #   name: Test
-  #   runs-on: ubuntu-latest
-  #   steps:  #     - name: Set up Go
-  #       uses: actions/setup-go@v5
-  #       with:
-  #         go-version: '1.24'
+# test:
+#   name: Test
+#   runs-on: ubuntu-latest
+#   steps:  #     - name: Set up Go
+#       uses: actions/setup-go@v5
+#       with:
+#         go-version: '1.24'
 
-  #     - name: Check out code
-  #       uses: actions/checkout@v4
+#     - name: Check out code
+#       uses: actions/checkout@v4
 
-  #     - name: Test
-  #       run: make cover
+#     - name: Test
+#       run: make cover
 
-  #     - name: Cover
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: cover
-  #         path: ./cover.html
+#     - name: Cover
+#       uses: actions/upload-artifact@v4
+#       with:
+#         name: cover
+#         path: ./cover.html

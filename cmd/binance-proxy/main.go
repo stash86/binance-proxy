@@ -5,11 +5,14 @@ import (
 	"binance-proxy/internal/logcache"
 	"binance-proxy/internal/service"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	stdlog "log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,39 +22,101 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func startProxy(ctx context.Context, port int, class service.Class, disablefakekline bool, alwaysshowforwards bool) {
-	mux := http.NewServeMux()
-	address := fmt.Sprintf(":%d", port)
-	mux.HandleFunc("/", handler.NewHandler(ctx, class, !disablefakekline, alwaysshowforwards))
+const (
+	proxyReadTimeout       = 30 * time.Second
+	proxyReadHeaderTimeout = 10 * time.Second
+	proxyWriteTimeout      = 75 * time.Second
+	proxyIdleTimeout       = 120 * time.Second
+	proxyShutdownTimeout   = 5 * time.Second
+	maxTCPPort             = 65535
+)
 
-	// Create an HTTP server with a custom ErrorLog that suppresses repeated lines
-	srv := &http.Server{
-		Addr:              address,
-		Handler:           mux,
-		ReadTimeout:       30 * time.Second,
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      75 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		ErrorLog: stdlog.New(
-			logcache.NewSuppressingWriter(os.Stderr),
-			"", stdlog.LstdFlags,
-		),
-	}
-
-	log.Infof("%s websocket proxy starting on port %d.", class, port)
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("%s websocket proxy start failed (error: %s).", class, err)
+func startProxy(ctx context.Context, port int, class service.Class, disableFakeKline bool, alwaysShowForwards bool) {
+	if err := serveProxy(ctx, port, class, disableFakeKline, alwaysShowForwards, os.Stderr); err != nil {
+		log.Fatalf("%s websocket proxy stopped with error: %s.", class, err)
 	}
 }
 
-func handleSignal() {
+func serveProxy(ctx context.Context, port int, class service.Class, disableFakeKline bool, alwaysShowForwards bool, errorWriter io.Writer) error {
+	srv := newProxyServer(proxyAddress(port), newProxyMux(ctx, class, disableFakeKline, alwaysShowForwards), errorWriter)
+
+	log.Infof("%s websocket proxy starting on port %d.", class, port)
+	errC := make(chan error, 1)
+	go func() {
+		errC <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errC:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), proxyShutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		return err
+	}
+
+	if err := <-errC; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func newProxyMux(ctx context.Context, class service.Class, disableFakeKline bool, alwaysShowForwards bool) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", handler.NewHandler(ctx, class, !disableFakeKline, alwaysShowForwards))
+	return mux
+}
+
+func proxyAddress(port int) string {
+	return fmt.Sprintf(":%d", port)
+}
+
+func newProxyServer(address string, handler http.Handler, errorWriter io.Writer) *http.Server {
+	return &http.Server{
+		Addr:              address,
+		Handler:           handler,
+		ReadTimeout:       proxyReadTimeout,
+		ReadHeaderTimeout: proxyReadHeaderTimeout,
+		WriteTimeout:      proxyWriteTimeout,
+		IdleTimeout:       proxyIdleTimeout,
+		ErrorLog: stdlog.New(
+			logcache.NewSuppressingWriter(errorWriter),
+			"", stdlog.LstdFlags,
+		),
+	}
+}
+
+func handleSignal(cancel context.CancelFunc) {
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-	for s := range signalChan {
-		switch s {
-		case syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT:
-			cancel()
+	defer signal.Stop(signalChan)
+
+	waitForShutdownSignal(signalChan, cancel)
+}
+
+func waitForShutdownSignal(signalChan <-chan os.Signal, cancel context.CancelFunc) {
+	for sig := range signalChan {
+		if isShutdownSignal(sig) {
+			if cancel != nil {
+				cancel()
+			}
+			return
 		}
+	}
+}
+
+func isShutdownSignal(sig os.Signal) bool {
+	switch sig {
+	case syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -68,8 +133,8 @@ type Config struct {
 var (
 	config      Config
 	parser             = flags.NewParser(&config, flags.Default)
-	Version     string = "1.0.4"
-	Buildtime   string = "2025-08-11"
+	Version     string = "1.0.5"
+	Buildtime   string = "2026-06-30"
 	ctx, cancel        = context.WithCancel(context.Background())
 )
 
@@ -79,7 +144,59 @@ func main() {
 		FullTimestamp: true,
 	})
 
-	// Route logcache output through logrus for consistent formatting/levels
+	installLogcacheHooks()
+
+	log.Infof("Binance proxy version %s, build time %s", Version, Buildtime)
+
+	if _, err := parser.Parse(); err != nil {
+		if isHelpError(err) {
+			os.Exit(0)
+		}
+		log.Fatal(err)
+	}
+
+	configureLogging(config.Verbose)
+
+	if log.GetLevel() > log.InfoLevel {
+		log.Infof("Set level to %s", log.GetLevel())
+	}
+
+	if err := validateConfig(config); err != nil {
+		log.Fatal(err)
+	}
+
+	if !config.DisableFakeKline {
+		log.Infof("Fake candles are enabled for faster processing, the feature can be disabled with --disable-fake-candles or -c")
+	}
+
+	if config.AlwaysShowForwards {
+		log.Infof("Always show forwards is enabled, all API requests, that can't be served from websockets cached will be logged.")
+	}
+
+	go handleSignal(cancel)
+
+	var wg sync.WaitGroup
+	if !config.DisableSpot {
+		startProxyAsync(&wg, ctx, config.SpotAddress, service.SPOT, config.DisableFakeKline, config.AlwaysShowForwards)
+	}
+	if !config.DisableFutures {
+		startProxyAsync(&wg, ctx, config.FuturesAddress, service.FUTURES, config.DisableFakeKline, config.AlwaysShowForwards)
+	}
+	<-ctx.Done()
+	log.Info("shutdown signal received, aborting ...")
+	wg.Wait()
+}
+
+func startProxyAsync(wg *sync.WaitGroup, ctx context.Context, port int, class service.Class, disableFakeKline bool, alwaysShowForwards bool) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		startProxy(ctx, port, class, disableFakeKline, alwaysShowForwards)
+	}()
+}
+
+func installLogcacheHooks() {
+	// Route logcache output through logrus for consistent formatting/levels.
 	logcache.SetLoggerHook(func(level, msg string) {
 		switch level {
 		case "warn":
@@ -93,56 +210,54 @@ func main() {
 		}
 	})
 	logcache.SetWriterHook(func(msg string) {
-		// net/http ErrorLog messages typically include trailing newlines
-		if len(msg) > 0 && msg[len(msg)-1] == '\n' {
-			msg = msg[:len(msg)-1]
-		}
-		log.Warnf("http: %s", msg)
+		log.Warnf("http: %s", trimTrailingNewline(msg))
 	})
+}
 
-	log.Infof("Binance proxy version %s, build time %s", Version, Buildtime)
+func trimTrailingNewline(msg string) string {
+	if len(msg) > 0 && msg[len(msg)-1] == '\n' {
+		return msg[:len(msg)-1]
+	}
+	return msg
+}
 
-	if _, err := parser.Parse(); err != nil {
-		if flagsErr, ok := err.(*flags.Error); ok && flagsErr.Type == flags.ErrHelp {
-			os.Exit(0)
-		} else {
-			log.Fatalf("%s - %s", err, flagsErr.Type)
-		}
+func isHelpError(err error) bool {
+	var flagsErr *flags.Error
+	return errors.As(err, &flagsErr) && flagsErr.Type == flags.ErrHelp
+}
+
+func configureLogging(verbose []bool) {
+	log.SetLevel(logLevelForVerbosity(verbose))
+}
+
+func logLevelForVerbosity(verbose []bool) log.Level {
+	switch {
+	case len(verbose) >= 2:
+		return log.TraceLevel
+	case len(verbose) == 1:
+		return log.DebugLevel
+	default:
+		return log.InfoLevel
+	}
+}
+
+func validateConfig(cfg Config) error {
+	if cfg.DisableSpot && cfg.DisableFutures {
+		return errors.New("can't start if both SPOT and FUTURES are disabled")
+	}
+	if !cfg.DisableSpot && !validTCPPort(cfg.SpotAddress) {
+		return fmt.Errorf("invalid SPOT port %d", cfg.SpotAddress)
+	}
+	if !cfg.DisableFutures && !validTCPPort(cfg.FuturesAddress) {
+		return fmt.Errorf("invalid FUTURES port %d", cfg.FuturesAddress)
+	}
+	if !cfg.DisableSpot && !cfg.DisableFutures && cfg.SpotAddress == cfg.FuturesAddress {
+		return fmt.Errorf("SPOT and FUTURES ports must be different: %d", cfg.SpotAddress)
 	}
 
-	if len(config.Verbose) >= 2 {
-		log.SetLevel(log.TraceLevel)
-	} else if len(config.Verbose) == 1 {
-		log.SetLevel(log.DebugLevel)
-	} else {
-		log.SetLevel(log.InfoLevel)
-	}
+	return nil
+}
 
-	if log.GetLevel() > log.InfoLevel {
-		log.Infof("Set level to %s", log.GetLevel())
-	}
-
-	if config.DisableSpot && config.DisableFutures {
-		log.Fatal("can't start if both SPOT and FUTURES are disabled!")
-	}
-
-	if !config.DisableFakeKline {
-		log.Infof("Fake candles are enabled for faster processing, the feature can be disabled with --disable-fake-candles or -c")
-	}
-
-	if config.AlwaysShowForwards {
-		log.Infof("Always show forwards is enabled, all API requests, that can't be served from websockets cached will be logged.")
-	}
-
-	go handleSignal()
-
-	if !config.DisableSpot {
-		go startProxy(ctx, config.SpotAddress, service.SPOT, config.DisableFakeKline, config.AlwaysShowForwards)
-	}
-	if !config.DisableFutures {
-		go startProxy(ctx, config.FuturesAddress, service.FUTURES, config.DisableFakeKline, config.AlwaysShowForwards)
-	}
-	<-ctx.Done()
-
-	log.Info("SIGINT received, aborting ...")
+func validTCPPort(port int) bool {
+	return port > 0 && port <= maxTCPPort
 }
