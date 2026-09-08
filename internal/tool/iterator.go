@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"math/rand/v2"
 	"time"
 )
 
@@ -48,11 +49,25 @@ func (s *DelayIterator) Delay() {
 }
 
 func (s *DelayIterator) DelayContext(ctx context.Context) bool {
+	return waitDelayContext(ctx, s.nextDelay())
+}
+
+// DelayContextWithJitter waits for between half and all of the next delay.
+// Positive configured delays always result in a positive wait.
+func (s *DelayIterator) DelayContextWithJitter(ctx context.Context) bool {
+	delay := s.nextDelay()
+	if delay > 0 {
+		minimum := delay/2 + delay%2
+		delay = minimum + time.Duration(rand.Int64N(int64(delay-minimum)+1))
+	}
+	return waitDelayContext(ctx, delay)
+}
+
+func waitDelayContext(ctx context.Context, delay time.Duration) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	delay := s.nextDelay()
 	if delay <= 0 {
 		select {
 		case <-ctx.Done():

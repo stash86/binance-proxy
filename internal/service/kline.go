@@ -17,9 +17,13 @@ import (
 )
 
 const (
-	klineHistoryLimit = 1000
-	klineInitTimeout  = 2 * time.Second
-	klineStopTimeout  = time.Second
+	klineHistoryLimit       = 1000
+	klineInitTimeout        = 2 * time.Second
+	klineFreshnessTimeout   = 15 * time.Second
+	klineBoundaryGrace      = 5 * time.Second
+	klineStallTimeout       = 30 * time.Second
+	klineWatchInterval      = time.Second
+	klineHealthyResetPeriod = time.Minute
 )
 
 type Kline struct {
@@ -34,6 +38,14 @@ type Kline struct {
 	TradeNum                 int64
 	TakerBuyBaseAssetVolume  string
 	TakerBuyQuoteAssetVolume string
+	IsFinal                  bool `json:"-"`
+}
+
+// IsCurrent checks candle coverage, independently of feed freshness. The HTTP
+// handler rechecks it because a candle can close after the cache was copied.
+func (k *Kline) IsCurrent(nowMS int64) bool {
+	return k != nil && k.CloseTime >= nowMS-klineBoundaryGrace.Milliseconds() &&
+		(nowMS <= k.CloseTime || k.IsFinal)
 }
 
 type KlinesSrv struct {
@@ -48,6 +60,10 @@ type KlinesSrv struct {
 	si         *symbolInterval
 	klinesList *list.List
 	klinesArr  []*Kline
+	lastUpdate time.Time
+	lastEvent  int64
+	historyAt  time.Time
+	recoveryAt time.Time
 }
 
 func NewKlinesSrv(ctx context.Context, si *symbolInterval) *KlinesSrv {
@@ -59,49 +75,98 @@ func NewKlinesSrv(ctx context.Context, si *symbolInterval) *KlinesSrv {
 }
 
 func (s *KlinesSrv) Start() {
-	go func() {
-		for d := tool.NewDelayIterator(); ; {
-			select {
-			case <-s.ctx.Done():
-				return
-			default:
-			}
+	go s.run(s.connect, func(ctx context.Context) error {
+		return waitKlineConnection(ctx, s.si.Class)
+	})
+}
 
-			s.clearKlineList()
-
-			doneC, stopC, err := s.connect()
-			if err != nil {
-				log.Errorf("%s %s@%s kline websocket connection error: %s.", s.si.Class, s.si.Symbol, s.si.Interval, err)
-				if !d.DelayContext(s.ctx) {
-					return
-				}
-				continue
-			}
-
+// Waiting for doneC after cancellation also joins the SDK's synchronous callback.
+// A replacement connection must never share the cache with an old callback.
+func (s *KlinesSrv) run(connect func(context.Context) (chan struct{}, chan struct{}, error), waitConnection func(context.Context) error) {
+	delay := newKlineRetryDelay()
+	defer s.clearKlineList()
+	for s.ctx.Err() == nil {
+		if err := waitConnection(s.ctx); err != nil {
+			return
+		}
+		connectionCtx, cancel := context.WithCancel(s.ctx)
+		doneC, stopC, err := connect(connectionCtx)
+		if err != nil {
+			cancel()
+			log.Errorf("%s %s@%s kline websocket connection error: %s.", s.si.Class, s.si.Symbol, s.si.Interval, err)
+		} else {
 			log.Debugf("%s %s@%s kline websocket connected.", s.si.Class, s.si.Symbol, s.si.Interval)
-			d.Reset()
-			select {
-			case <-s.ctx.Done():
-				s.stopWebsocket(stopC)
-				return
-			case <-doneC:
-			}
-			log.Warnf("%s %s@%s kline websocket disconnected, trying to reconnect.", s.si.Class, s.si.Symbol, s.si.Interval)
-			if !d.DelayContext(s.ctx) {
-				return
+			healthy := s.watchConnection(doneC, time.Now())
+			cancel()
+			s.clearKlineList()
+			close(stopC)
+			<-doneC
+			if healthy {
+				delay.Reset()
 			}
 		}
-	}()
+		if !delay.DelayContextWithJitter(s.ctx) {
+			return
+		}
+	}
+}
+
+func newKlineRetryDelay() *tool.DelayIterator {
+	delay := tool.NewDelayIterator()
+	delay.SetDelayList([]time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 32 * time.Second, time.Minute})
+	return delay
+}
+
+func (s *KlinesSrv) watchConnection(doneC <-chan struct{}, started time.Time) bool {
+	ticker := time.NewTicker(klineWatchInterval)
+	defer ticker.Stop()
+	var healthySince time.Time
+	healthy := false
+	for {
+		select {
+		case <-s.ctx.Done():
+			return healthy
+		case <-doneC:
+			log.Warnf("%s %s@%s kline websocket disconnected; rebuilding candle cache.", s.si.Class, s.si.Symbol, s.si.Interval)
+			return healthy
+		case now := <-ticker.C:
+			s.rw.RLock()
+			lastUpdate := s.lastUpdate
+			recoveryAt := s.recoveryAt
+			fresh := s.freshLocked(now)
+			s.rw.RUnlock()
+			if fresh {
+				if healthySince.IsZero() {
+					healthySince = now
+				}
+				healthy = healthy || now.Sub(healthySince) >= klineHealthyResetPeriod
+			} else {
+				healthySince = time.Time{}
+			}
+			if lastUpdate.IsZero() {
+				lastUpdate = started
+				if recoveryAt.After(started) {
+					lastUpdate = recoveryAt
+				}
+			}
+			if now.Sub(lastUpdate) >= klineStallTimeout {
+				log.Warnf("%s %s@%s kline websocket has no fresh data for %s; reconnecting.", s.si.Class, s.si.Symbol, s.si.Interval, klineStallTimeout)
+				return healthy
+			}
+		}
+	}
 }
 
 func (s *KlinesSrv) Stop() {
 	s.cancel()
+	s.clearKlineList()
 }
 
 func (s *KlinesSrv) errHandler(err error) {
 	if err == nil {
 		return
 	}
+	s.clearKlineList()
 
 	msg := strings.ToLower(err.Error())
 	switch {
@@ -114,169 +179,153 @@ func (s *KlinesSrv) errHandler(err error) {
 	}
 }
 
-func (s *KlinesSrv) connect() (doneC, stopC chan struct{}, err error) {
+func (s *KlinesSrv) connect(ctx context.Context) (doneC, stopC chan struct{}, err error) {
 	if s.si.Class == SPOT {
 		return spot.WsKlineServe(s.si.Symbol,
 			s.si.Interval,
-			func(event *spot.WsKlineEvent) { s.wsHandler(event) },
+			func(event *spot.WsKlineEvent) { s.wsHandler(ctx, event) },
 			s.errHandler,
 		)
 	} else {
 		return futures.WsKlineServe(s.si.Symbol,
 			s.si.Interval,
-			func(event *futures.WsKlineEvent) { s.wsHandler(event) },
+			func(event *futures.WsKlineEvent) { s.wsHandler(ctx, event) },
 			s.errHandler,
 		)
 	}
 }
 
-func (s *KlinesSrv) initKlineData() {
-	// Check if API is banned
+// Bootstrap is scoped to one connection, including its REST retries. The first
+// event only triggers bootstrap; it must not overwrite a newer REST snapshot.
+func (s *KlinesSrv) initKlineData(ctx context.Context) {
 	banDetector := GetBanDetector()
-	if banDetector.IsBanned(s.si.Class) {
-		log.Debugf("%s %s@%s kline initialization skipped due to API ban", s.si.Class, s.si.Symbol, s.si.Interval)
-
-		// Create empty klines list to prevent repeated initialization attempts
-		s.setKlineList(list.New(), false)
-		s.initDone()
-		return
-	}
-
-	var klines interface{}
-	var err error
-	log.Debugf("%s %s@%s kline initialization through REST.", s.si.Class, s.si.Symbol, s.si.Interval)
-	for d := tool.NewDelayIterator(); ; {
-		if err := s.ctx.Err(); err != nil {
-			s.setKlineList(list.New(), false)
-			s.initDone()
-			return
-		}
-
-		// Check ban status before each attempt
+	for delay := newKlineRetryDelay(); ctx.Err() == nil; {
 		if banDetector.IsBanned(s.si.Class) {
-			log.Debugf("%s %s@%s kline initialization stopped due to API ban", s.si.Class, s.si.Symbol, s.si.Interval)
-			s.setKlineList(list.New(), false)
-			s.initDone()
+			return
+		}
+		path := "/api/v3/klines"
+		if s.si.Class == FUTURES {
+			path = "/fapi/v1/klines"
+		}
+		if err := RateWait(ctx, s.si.Class, http.MethodGet, path, url.Values{"limit": {"1000"}}); err != nil {
+			return
+		}
+		if ctx.Err() != nil {
 			return
 		}
 
-		var resp *http.Response
+		log.Debugf("%s %s@%s kline initialization through REST.", s.si.Class, s.si.Symbol, s.si.Interval)
+		fetchStarted := time.Now()
+		klinesList := list.New()
+		var err error
 		if s.si.Class == SPOT {
-			if err := RateWait(s.ctx, s.si.Class, http.MethodGet, "/api/v3/klines", url.Values{
-				"limit": []string{"1000"},
-			}); err != nil {
-				s.setKlineList(list.New(), false)
-				s.initDone()
-				return
+			var klines []*spot.Kline
+			klines, err = spot.NewClient("", "").NewKlinesService().
+				Symbol(s.si.Symbol).Interval(s.si.Interval).Limit(klineHistoryLimit).Do(ctx)
+			for _, k := range klines {
+				if k != nil {
+					klinesList.PushBack(klineFromSpotREST(k))
+				}
 			}
-			if err := s.ctx.Err(); err != nil {
-				s.setKlineList(list.New(), false)
-				s.initDone()
-				return
-			}
-			client := spot.NewClient("", "")
-			klines, err = client.NewKlinesService().
-				Symbol(s.si.Symbol).Interval(s.si.Interval).Limit(1000).
-				Do(s.ctx)
 		} else {
-			if err := RateWait(s.ctx, s.si.Class, http.MethodGet, "/fapi/v1/klines", url.Values{
-				"limit": []string{"1000"},
-			}); err != nil {
-				s.setKlineList(list.New(), false)
-				s.initDone()
-				return
+			var klines []*futures.Kline
+			klines, err = futures.NewClient("", "").NewKlinesService().
+				Symbol(s.si.Symbol).Interval(s.si.Interval).Limit(klineHistoryLimit).Do(ctx)
+			for _, k := range klines {
+				if k != nil {
+					klinesList.PushBack(klineFromFuturesREST(k))
+				}
 			}
-			if err := s.ctx.Err(); err != nil {
-				s.setKlineList(list.New(), false)
-				s.initDone()
-				return
-			}
-			client := futures.NewClient("", "")
-			klines, err = client.NewKlinesService().
-				Symbol(s.si.Symbol).Interval(s.si.Interval).Limit(1000).
-				Do(s.ctx)
 		}
-
-		// Check for bans (resp might be nil for SDK calls, so we check err)
-		if banDetector.CheckResponse(s.si.Class, resp, err) {
-			log.Debugf("%s %s@%s kline initialization stopped due to detected ban", s.si.Class, s.si.Symbol, s.si.Interval)
-			s.setKlineList(list.New(), false)
-			s.initDone()
+		if ctx.Err() != nil || banDetector.CheckResponse(s.si.Class, nil, err) {
 			return
 		}
-
 		if err != nil {
-			log.Errorf("%s %s@%s kline initialization via REST failed, error: %s.", s.si.Class, s.si.Symbol, s.si.Interval, err)
-			if !d.DelayContext(s.ctx) {
-				s.setKlineList(list.New(), false)
-				s.initDone()
+			log.Errorf("%s %s@%s kline initialization via REST failed: %s.", s.si.Class, s.si.Symbol, s.si.Interval, err)
+			if !delay.DelayContextWithJitter(ctx) {
 				return
 			}
 			continue
 		}
-
-		klinesList := list.New()
-
-		if vi, ok := klines.([]*spot.Kline); ok {
-			for _, v := range vi {
-				if v == nil {
-					continue
-				}
-
-				klinesList.PushBack(klineFromSpotREST(v))
-			}
-		} else if vi, ok := klines.([]*futures.Kline); ok {
-			for _, v := range vi {
-				if v == nil {
-					continue
-				}
-
-				klinesList.PushBack(klineFromFuturesREST(v))
-			}
+		if klinesList.Len() == 0 {
+			return
 		}
-
-		s.setKlineList(klinesList, true)
-		s.initDone()
+		for item := klinesList.Front(); item != nil; item = item.Next() {
+			k := item.Value.(*Kline)
+			k.IsFinal = k.CloseTime < fetchStarted.UnixMilli()
+		}
+		s.rw.Lock()
+		if ctx.Err() == nil {
+			s.klinesList = klinesList
+			s.klinesArr = klinesFromList(klinesList)
+			s.historyAt = time.Now()
+		}
+		s.rw.Unlock()
 		return
 	}
 }
 
-func (s *KlinesSrv) wsHandler(event interface{}) {
-	k, ok := klineFromWSEvent(event)
-	if !ok {
+func (s *KlinesSrv) wsHandler(ctx context.Context, event interface{}) {
+	receivedAt := time.Now()
+	k, eventTime, ok := klineFromWSEvent(event)
+	if !ok || ctx.Err() != nil || eventTime <= 0 ||
+		eventTime < receivedAt.Add(-klineFreshnessTimeout).UnixMilli() ||
+		eventTime > receivedAt.Add(klineBoundaryGrace).UnixMilli() ||
+		k.OpenTime > receivedAt.Add(klineBoundaryGrace).UnixMilli() ||
+		k.CloseTime < k.OpenTime || k.CloseTime < receivedAt.Add(-klineBoundaryGrace).UnixMilli() {
 		return
 	}
 
-	if s.getKlineList() == nil {
-		s.initKlineData()
-	}
-
-	log.Tracef("%s %s@%s kline websocket message received for open timestamp %d", s.si.Class, s.si.Symbol, s.si.Interval, k.OpenTime)
-
 	s.rw.Lock()
-	defer s.rw.Unlock()
-
+	if ctx.Err() != nil {
+		s.rw.Unlock()
+		return
+	}
 	if s.klinesList == nil {
-		s.klinesList = list.New()
+		s.rw.Unlock()
+		s.initKlineData(ctx)
+		return
 	}
-
-	if s.klinesList.Len() == 0 {
-		s.klinesList.PushBack(k)
-	} else {
+	// Buffered events predating bootstrap or the last accepted event must not
+	// regress the snapshot or renew its freshness.
+	if eventTime <= s.historyAt.UnixMilli() || eventTime <= s.lastEvent {
+		s.rw.Unlock()
+		return
+	}
+	if s.klinesList.Len() > 0 {
 		last := s.klinesList.Back().Value.(*Kline)
-		if last.OpenTime < k.OpenTime {
-			s.klinesList.PushBack(k)
-		} else if last.OpenTime == k.OpenTime {
-			s.klinesList.Back().Value = k
+		if k.OpenTime < last.OpenTime {
+			s.rw.Unlock()
+			return
 		}
+		if k.OpenTime > last.OpenTime && (k.OpenTime != last.CloseTime+1 || !last.IsFinal) {
+			// Recover a missing candle or missed final update before exposing the
+			// next candle. The history download is canceled with this connection.
+			s.clearKlineListLocked()
+			s.rw.Unlock()
+			s.initKlineData(ctx)
+			return
+		}
+		if last.OpenTime == k.OpenTime {
+			if last.IsFinal && !k.IsFinal {
+				s.rw.Unlock()
+				return
+			}
+			s.klinesList.Back().Value = k
+		} else {
+			s.klinesList.PushBack(k)
+		}
+	} else {
+		s.klinesList.PushBack(k)
 	}
-
 	for s.klinesList.Len() > klineHistoryLimit {
 		s.klinesList.Remove(s.klinesList.Front())
 	}
-
 	s.klinesArr = klinesFromList(s.klinesList)
+	s.lastUpdate = receivedAt
+	s.lastEvent = eventTime
 	s.initDone()
+	s.rw.Unlock()
 }
 
 func (s *KlinesSrv) GetKlines() []*Kline {
@@ -287,10 +336,26 @@ func (s *KlinesSrv) GetKlines() []*Kline {
 	s.rw.RLock()
 	defer s.rw.RUnlock()
 
+	if !s.freshLocked(time.Now()) {
+		return nil
+	}
 	return cloneKlines(s.klinesArr)
 }
 
+func (s *KlinesSrv) freshLocked(now time.Time) bool {
+	if s.ctx.Err() != nil || s.lastUpdate.IsZero() || len(s.klinesArr) == 0 ||
+		now.Sub(s.lastUpdate) > klineFreshnessTimeout ||
+		s.lastEvent < now.Add(-klineFreshnessTimeout).UnixMilli() {
+		return false
+	}
+	last := s.klinesArr[len(s.klinesArr)-1]
+	return last.IsCurrent(now.UnixMilli())
+}
+
 func (s *KlinesSrv) waitForInit() bool {
+	if s.ctx.Err() != nil {
+		return false
+	}
 	select {
 	case <-s.initCtx.Done():
 		return true
@@ -314,36 +379,18 @@ func (s *KlinesSrv) clearKlineList() {
 	s.rw.Lock()
 	defer s.rw.Unlock()
 
+	s.clearKlineListLocked()
+}
+
+func (s *KlinesSrv) clearKlineListLocked() {
+	if s.klinesList != nil || s.recoveryAt.IsZero() {
+		s.recoveryAt = time.Now()
+	}
 	s.klinesList = nil
-}
-
-func (s *KlinesSrv) getKlineList() *list.List {
-	s.rw.RLock()
-	defer s.rw.RUnlock()
-
-	return s.klinesList
-}
-
-func (s *KlinesSrv) setKlineList(klinesList *list.List, updateArr bool) {
-	s.rw.Lock()
-	defer s.rw.Unlock()
-
-	s.klinesList = klinesList
-	if updateArr {
-		s.klinesArr = klinesFromList(klinesList)
-	}
-}
-
-func (s *KlinesSrv) stopWebsocket(stopC chan struct{}) {
-	if stopC == nil {
-		return
-	}
-
-	select {
-	case stopC <- struct{}{}:
-	case <-time.After(klineStopTimeout):
-		log.Debugf("%s %s@%s kline websocket stop signal timed out.", s.si.Class, s.si.Symbol, s.si.Interval)
-	}
+	s.klinesArr = nil
+	s.lastUpdate = time.Time{}
+	s.lastEvent = 0
+	s.historyAt = time.Time{}
 }
 
 func klineFromSpotREST(v *spot.Kline) *Kline {
@@ -378,11 +425,11 @@ func klineFromFuturesREST(v *futures.Kline) *Kline {
 	}
 }
 
-func klineFromWSEvent(event interface{}) (*Kline, bool) {
+func klineFromWSEvent(event interface{}) (*Kline, int64, bool) {
 	switch vi := event.(type) {
 	case *spot.WsKlineEvent:
 		if vi == nil {
-			return nil, false
+			return nil, 0, false
 		}
 		return &Kline{
 			OpenTime:                 vi.Kline.StartTime,
@@ -396,10 +443,11 @@ func klineFromWSEvent(event interface{}) (*Kline, bool) {
 			TradeNum:                 vi.Kline.TradeNum,
 			TakerBuyBaseAssetVolume:  vi.Kline.ActiveBuyVolume,
 			TakerBuyQuoteAssetVolume: vi.Kline.ActiveBuyQuoteVolume,
-		}, true
+			IsFinal:                  vi.Kline.IsFinal,
+		}, vi.Time, true
 	case *futures.WsKlineEvent:
 		if vi == nil {
-			return nil, false
+			return nil, 0, false
 		}
 		return &Kline{
 			OpenTime:                 vi.Kline.StartTime,
@@ -413,9 +461,10 @@ func klineFromWSEvent(event interface{}) (*Kline, bool) {
 			TradeNum:                 vi.Kline.TradeNum,
 			TakerBuyBaseAssetVolume:  vi.Kline.ActiveBuyVolume,
 			TakerBuyQuoteAssetVolume: vi.Kline.ActiveBuyQuoteVolume,
-		}, true
+			IsFinal:                  vi.Kline.IsFinal,
+		}, vi.Time, true
 	default:
-		return nil, false
+		return nil, 0, false
 	}
 }
 

@@ -42,7 +42,7 @@ docker run --rm -d stash86/binance-proxy:latest
 
 ## ⚒️ Installing from source
 
-First of all, [download](https://golang.org/dl/) and install **Go**. Version `1.17` or higher is required.
+First of all, [download](https://golang.org/dl/) and install **Go**. Version `1.26.4` or higher is required.
 
 Installation is done by using the [`go install`](https://golang.org/cmd/go/#hdr-Compile_and_install_packages_and_dependencies) command and rename installed binary in `$GOPATH/bin`:
 

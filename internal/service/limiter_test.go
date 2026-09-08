@@ -6,6 +6,10 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"testing/synctest"
+	"time"
+
+	"golang.org/x/time/rate"
 )
 
 func TestRequestWeight(t *testing.T) {
@@ -65,6 +69,38 @@ func TestRateWaitReturnsContextError(t *testing.T) {
 	if err := RateWait(ctx, SPOT, http.MethodGet, "/api/v3/ping", nil); err == nil {
 		t.Fatal("expected context error")
 	}
+}
+
+func TestKlineConnectionAttemptsArePacedAndCancelable(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		oldSpot, oldFutures := spotKlineConnections, futuresKlineConnections
+		spotKlineConnections = rate.NewLimiter(rate.Every(1500*time.Millisecond), 1)
+		futuresKlineConnections = rate.NewLimiter(rate.Every(1500*time.Millisecond), 1)
+		defer func() { spotKlineConnections, futuresKlineConnections = oldSpot, oldFutures }()
+		started := time.Now()
+		for _, class := range []Class{SPOT, FUTURES} {
+			if err := waitKlineConnection(context.Background(), class); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if time.Since(started) != 0 {
+			t.Fatal("market types unexpectedly share their initial connection allowance")
+		}
+		if err := waitKlineConnection(context.Background(), SPOT); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(started); elapsed != 1500*time.Millisecond {
+			t.Fatalf("second spot connection after %s, want 1.5s", elapsed)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		finished := make(chan error, 1)
+		go func() { finished <- waitKlineConnection(ctx, SPOT) }()
+		synctest.Wait()
+		cancel()
+		if err := <-finished; err != context.Canceled {
+			t.Fatalf("canceled connection wait = %v", err)
+		}
+	})
 }
 
 func limitValues(limit string) url.Values {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 
 	"golang.org/x/time/rate"
 )
@@ -18,7 +19,20 @@ const (
 var (
 	SpotLimiter    = rate.NewLimiter(rate.Limit(spotWeightLimitPerMinute/60), spotWeightLimitPerMinute)
 	FuturesLimiter = rate.NewLimiter(rate.Limit(futuresWeightLimitPerMinute/60), futuresWeightLimitPerMinute)
+
+	// Pace initial candle connections and reconnects together, leaving headroom
+	// below Spot's 300 attempts / 5 minutes / IP. These budgets are per process;
+	// other feeds and other processes on the same public IP also consume limits.
+	spotKlineConnections    = rate.NewLimiter(rate.Every(1500*time.Millisecond), 1)
+	futuresKlineConnections = rate.NewLimiter(rate.Every(1500*time.Millisecond), 1)
 )
+
+func waitKlineConnection(ctx context.Context, class Class) error {
+	if class == SPOT {
+		return spotKlineConnections.Wait(ctx)
+	}
+	return futuresKlineConnections.Wait(ctx)
+}
 
 func RateWait(ctx context.Context, class Class, method, path string, query url.Values) error {
 	weight := RequestWeight(class, method, path, query)

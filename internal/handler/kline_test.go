@@ -182,6 +182,53 @@ func TestBuildKlineResponseDoesNotFakeWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildKlineResponseRechecksSnapshotAtBoundary(t *testing.T) {
+	tests := []struct {
+		name         string
+		nowMS        int64
+		final        bool
+		needsRefresh bool
+	}{
+		{name: "unfinished snapshot at close", nowMS: 59999},
+		{name: "unfinished snapshot after close", nowMS: 60000, needsRefresh: true},
+		{name: "final snapshot within grace", nowMS: 64999, final: true},
+		{name: "final snapshot beyond grace", nowMS: 65000, final: true, needsRefresh: true},
+	}
+	for _, tt := range tests {
+		for _, includeFake := range []bool{false, true} {
+			name := tt.name
+			if includeFake {
+				name += " with fake enabled"
+			}
+			t.Run(name, func(t *testing.T) {
+				last := testKline(0, 59999, "10")
+				last.IsFinal = tt.final
+				got := buildKlineResponse([]*service.Kline{last}, 10, tt.nowMS, includeFake)
+				if got.NeedsRefresh != tt.needsRefresh {
+					t.Fatalf("NeedsRefresh = %v, want %v", got.NeedsRefresh, tt.needsRefresh)
+				}
+				if tt.needsRefresh {
+					if len(got.Items) != 0 || got.Fake {
+						t.Fatalf("unusable snapshot produced items or fake candle: %#v", got)
+					}
+					return
+				}
+				wantFake := includeFake && tt.nowMS > last.CloseTime
+				wantCount := 1
+				if wantFake {
+					wantCount++
+				}
+				if got.Fake != wantFake || len(got.Items) != wantCount {
+					t.Fatalf("usable snapshot response = %#v, want fake=%v and %d items", got, wantFake, wantCount)
+				}
+				if got.Items[0][4] != "10" || last.Close != "10" || last.IsFinal != tt.final {
+					t.Fatal("building response changed original candle")
+				}
+			})
+		}
+	}
+}
+
 func TestBuildKlineResponseSkipsNilKlines(t *testing.T) {
 	data := []*service.Kline{
 		nil,
@@ -247,5 +294,6 @@ func testKline(openTime, closeTime int64, close string) *service.Kline {
 		TradeNum:                 10,
 		TakerBuyBaseAssetVolume:  "0.5",
 		TakerBuyQuoteAssetVolume: "1.0",
+		IsFinal:                  true,
 	}
 }

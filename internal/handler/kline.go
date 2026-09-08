@@ -19,10 +19,11 @@ const (
 type klineResponseItem []interface{}
 
 type klineResponse struct {
-	Items    []klineResponseItem
-	Stale    bool
-	Fake     bool
-	FakeOpen int64
+	Items        []klineResponseItem
+	Stale        bool
+	Fake         bool
+	FakeOpen     int64
+	NeedsRefresh bool
 }
 
 func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +51,11 @@ func (s *Handler) klines(w http.ResponseWriter, r *http.Request) {
 
 	currentTime := time.Now().UnixNano() / 1e6
 	response := buildKlineResponse(data, limit, currentTime, s.enableFakeKline)
+	if response.NeedsRefresh {
+		log.Tracef("%s %s@%s kline snapshot crossed freshness boundary; proxying via REST", s.class, symbol, interval)
+		s.reverseProxy(w, r)
+		return
+	}
 	if response.Stale {
 		log.Tracef("%s %s@%s kline requested for %s but not yet received", s.class, symbol, interval, strconv.FormatInt(response.FakeOpen, 10))
 	}
@@ -119,8 +125,12 @@ func buildKlineResponse(data []*service.Kline, limit int, nowMS int64, includeFa
 
 	lastKline := klines[len(klines)-1]
 	result := klineResponse{
-		Stale:    nowMS > lastKline.CloseTime,
-		FakeOpen: lastKline.CloseTime + 1,
+		Stale:        nowMS > lastKline.CloseTime,
+		FakeOpen:     lastKline.CloseTime + 1,
+		NeedsRefresh: !lastKline.IsCurrent(nowMS),
+	}
+	if result.NeedsRefresh {
+		return result
 	}
 	if includeFake && result.Stale {
 		klines = append(klines, fakeKline(lastKline))
