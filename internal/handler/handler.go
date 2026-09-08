@@ -75,6 +75,9 @@ func (s *Handler) Router(w http.ResponseWriter, r *http.Request) {
 	case "/status":
 		s.status(w)
 
+	case "/status/klines":
+		s.klineStatus(w, r)
+
 	case "/restart":
 		s.restart(w, r)
 

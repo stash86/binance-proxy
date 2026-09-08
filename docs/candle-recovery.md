@@ -44,6 +44,52 @@ cannot renew freshness. Clock comparisons use Binance event timestamps and the
 host clock; hosts should keep their clocks synchronized.
 
 REST forwarding can still fail or be rate-limited. Recovery does not substitute
-old cache data for such failures. The existing `/status` response has no
-per-series freshness fields, and time-bounded requests still bypass the cache.
+old cache data for such failures. Time-bounded requests still bypass the cache.
 This change does not introduce clustering or combined WebSocket subscriptions.
+
+## Inspecting candle freshness
+
+`GET /status/klines` reports the existing WS candle caches for that listener's
+market (spot or futures). The existing `/status` response is unchanged.
+
+```json
+{
+  "class": "SPOT",
+  "ready": false,
+  "total": 1,
+  "fresh": 0,
+  "stale": 1,
+  "initializing": 0,
+  "recovering": 0,
+  "series": [
+    {
+      "symbol": "BTCUSDT",
+      "interval": "1m",
+      "state": "stale",
+      "reason": "update_stale",
+      "update_age_ms": 17000,
+      "event_age_ms": 17100
+    }
+  ]
+}
+```
+
+Each series uses the same freshness check as candle reads. `fresh` means its WS
+cache is eligible; `stale` means it has expired, lacks a current candle, or has
+stopped. `initializing` means initial history/WS confirmation is pending;
+`recovering` means the cache was invalidated and repair/WS confirmation is
+pending. The `reason` identifies the first failing condition, including
+`no_history`, `rebuilding_history`, `awaiting_ws_event`, `update_stale`,
+`event_stale`, `candle_not_current`, or `stopped`.
+
+Ages describe the last accepted WS receipt and Binance event, not arbitrary
+socket traffic. Unknown ages are `null`, including after recovery clears the
+cache. Small negative ages from clock skew are reported as zero. Series are
+sorted by symbol and interval. `ready` is true only when at least one series
+exists and every series is fresh; an unused proxy returns zero counts and `[]`.
+
+This diagnostic endpoint returns HTTP 200 even when data is stale; inspect its
+JSON fields. Shutdown returns 503, and methods other than GET return 405.
+Responses use `Cache-Control: no-store`. Polling does not start subscriptions,
+download history, wait for initialization, or extend idle retention. It reports
+WS cache freshness only; REST availability and bans remain visible in `/status`.
